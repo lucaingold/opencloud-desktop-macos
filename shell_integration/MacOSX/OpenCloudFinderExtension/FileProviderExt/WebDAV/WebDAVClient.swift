@@ -202,7 +202,18 @@ actor WebDAVClient {
         }
     }
 
-    private func performListDirectory(path: String) async throws -> [WebDAVItem] {
+    /// ETag of a single resource via PROPFIND Depth: 0. OpenCloud propagates
+    /// changes up to the space root, so the root ETag is a cheap change probe.
+    func etag(path: String) async throws -> String {
+        try await withRetry {
+            guard let item = try await self.performListDirectory(path: path, depth: "0").first else {
+                throw WebDAVError.parseError("PROPFIND omitted the requested resource")
+            }
+            return item.etag
+        }
+    }
+
+    private func performListDirectory(path: String, depth: String = "1") async throws -> [WebDAVItem] {
         guard let url = url(for: path) else {
             throw WebDAVError.invalidURL
         }
@@ -210,7 +221,7 @@ actor WebDAVClient {
         logger.debug("PROPFIND \(url.absoluteString)")
 
         var request = authenticatedRequest(url: url, method: "PROPFIND")
-        request.setValue("1", forHTTPHeaderField: "Depth")
+        request.setValue(depth, forHTTPHeaderField: "Depth")
         request.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.httpBody = Self.propfindBody
 

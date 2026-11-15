@@ -90,7 +90,16 @@ class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         return (metadata.remotePath, metadata.ocId)
     }
 
-    private func loadDirectory(path: String, parent: String, webdav: WebDAVClient, database: ItemDatabase) async throws -> (items: [ItemMetadata], missing: [ItemMetadata]) {
+    private struct DirectorySnapshot {
+        /// The directory's own ETag in this listing; record it only after `missing` is applied.
+        let etag: String
+        let items: [ItemMetadata]
+        let missing: [ItemMetadata]
+        /// Cached child ETags before this listing merged new ones.
+        let previousETags: [String: String]
+    }
+
+    private func loadDirectory(path: String, parent: String, webdav: WebDAVClient, database: ItemDatabase) async throws -> DirectorySnapshot {
         // Capture before the network request so concurrent local writes are not deleted.
         try Task.checkCancellation()
         let previous = await database.childItems(parentOcId: parent)
@@ -103,7 +112,23 @@ class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             metadata.append(merged)
         }
         let identifiers = Set(metadata.map { $0.ocId })
-        return (metadata, previous.filter { !identifiers.contains($0.ocId) })
+        return DirectorySnapshot(etag: response.first?.etag ?? "", items: metadata,
+                                 missing: previous.filter { !identifiers.contains($0.ocId) },
+                                 previousETags: Dictionary(previous.map { ($0.ocId, $0.etag) }, uniquingKeysWith: { first, _ in first }))
+    }
+
+    /// Whether a child directory's cached subtree may differ from the server.
+    /// OpenCloud propagates ETags to every ancestor, so an unchanged ETag proves
+    /// that nothing below it changed and the whole subtree can be skipped.
+    private func needsListing(_ child: ItemMetadata, in snapshot: DirectorySnapshot, database: ItemDatabase) async -> Bool {
+        if let listed = await database.listedETag(ocId: child.ocId) { return listed != child.etag }
+        // Children cached before ETags were recorded: reconcile once.
+        if await database.hasChildren(parentOcId: child.ocId) { return true }
+        // Never listed: a changed or new folder may have received a known item moved
+        // out of another folder. Its own new children are not followed further, so
+        // a fresh subtree is listed one level deep, not recursively.
+        if let previousETag = snapshot.previousETags[child.ocId] { return previousETag != child.etag }
+        return !snapshot.previousETags.isEmpty
     }
 
     private func refreshDirectory(path: String, parent: String, webdav: WebDAVClient, database: ItemDatabase) async throws -> [ItemMetadata] {
@@ -122,34 +147,42 @@ class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             try await database.deleteIfUnchanged(missing)
             if let retirement { await fpExtension?.syncStatus.retireRemovedItems(retirement, database: database) }
         }
+        // No listed ETag here: it vouches for the whole subtree, which only the
+        // working-set pass reconciles.
         return await database.childItems(parentOcId: parent)
     }
 
     private func refreshWorkingSet(webdav: WebDAVClient, database: ItemDatabase) async throws {
         // Refresh known folders, including parents of materialized nested files.
         // Opening another Finder window must not be required to discover their changes.
+        // Descend only into folders whose ETag changed, so an idle check costs one
+        // listing instead of one per known folder.
         if await webdav.supportsTrash {
             do { _ = try await FileProviderTrash.refresh(webdav: webdav, database: database) }
             catch WebDAVError.fileNotFound { /* The server may not offer an optional trash endpoint. */ }
             catch let error as CocoaError where error.code == .featureUnsupported {}
         }
-        let root = try await loadDirectory(path: "/", parent: ItemDatabase.rootContainerId, webdav: webdav, database: database)
-        var missing = root.missing
-        var cursor: String?
-        repeat {
-            let page = try await database.itemsPage(parentOcId: nil, after: cursor, limit: Self.pageSize, directoriesOnly: true)
-            for directory in page.items {
-                try Task.checkCancellation()
-                guard let current = await database.itemMetadata(ocId: directory.ocId), !current.isTrashed else { continue }
-                do {
-                    let snapshot = try await loadDirectory(path: current.remotePath, parent: current.ocId, webdav: webdav, database: database)
-                    missing.append(contentsOf: snapshot.missing)
-                } catch WebDAVError.fileNotFound {
-                    missing.append(current)
+        var queue = [(path: "/", ocId: ItemDatabase.rootContainerId)]
+        var missing: [ItemMetadata] = []
+        var listed: [String: String] = [:]
+        while !queue.isEmpty {
+            try Task.checkCancellation()
+            let directory = queue.removeFirst()
+            let snapshot: DirectorySnapshot
+            do {
+                snapshot = try await loadDirectory(path: directory.path, parent: directory.ocId, webdav: webdav, database: database)
+            } catch WebDAVError.fileNotFound where directory.ocId != ItemDatabase.rootContainerId {
+                if let current = await database.itemMetadata(ocId: directory.ocId) { missing.append(current) }
+                continue
+            }
+            missing.append(contentsOf: snapshot.missing)
+            listed[directory.ocId] = snapshot.etag
+            for child in snapshot.items where child.isDirectory && !child.isTrashed {
+                if await needsListing(child, in: snapshot, database: database) {
+                    queue.append((child.remotePath, child.ocId))
                 }
             }
-            cursor = page.next
-        } while cursor != nil
+        }
         // Apply all moves before deletions, so moving a cached folder between known
         // parents keeps its descendants and their local state.
         for item in missing {
@@ -158,6 +191,8 @@ class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             try await database.deleteIfUnchanged(item)
             if let retirement { await fpExtension?.syncStatus.retireRemovedItems(retirement, database: database) }
         }
+        // Record ETags last: an interrupted pass must be retried on the next check.
+        try await database.setListedETags(listed)
     }
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {

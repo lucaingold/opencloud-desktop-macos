@@ -180,6 +180,13 @@ actor ItemDatabase {
             CREATE TRIGGER IF NOT EXISTS items_delete AFTER DELETE ON items BEGIN
                 INSERT INTO item_changes(oc_id, parent_oc_id) VALUES (OLD.oc_id, OLD.parent_oc_id);
             END;
+            CREATE TABLE IF NOT EXISTS listed_directories (
+                oc_id TEXT PRIMARY KEY,
+                etag TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS listed_directories_delete AFTER DELETE ON items BEGIN
+                DELETE FROM listed_directories WHERE oc_id = OLD.oc_id;
+            END;
             COMMIT;
             """
         
@@ -860,7 +867,39 @@ actor ItemDatabase {
             try executeUpdate("DELETE FROM identities.finder_metadata")
             try executeUpdate("DELETE FROM identities.item_identities")
             try executeUpdate("DELETE FROM items")
+            try executeUpdate("DELETE FROM listed_directories")
         }
+    }
+
+    // MARK: - Listed directory ETags
+
+    /// ETag the directory reported for itself when the working-set pass last reconciled
+    /// its whole cached subtree. A parent listing refreshes the child's own ETag without
+    /// listing its children, so only this value proves the cached subtree is current.
+    func listedETag(ocId: String) -> String? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT etag FROM listed_directories WHERE oc_id = ?", -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, ocId, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return columnString(stmt, 0)
+    }
+
+    func setListedETags(_ etags: [String: String]) throws {
+        guard !etags.isEmpty else { return }
+        try transaction {
+            for (ocId, etag) in etags {
+                try executeBoundUpdate("INSERT OR REPLACE INTO listed_directories(oc_id, etag) VALUES (?, ?)", values: [ocId, etag])
+            }
+        }
+    }
+
+    func hasChildren(parentOcId: String) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM items WHERE parent_oc_id = ? LIMIT 1", -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, parentOcId, -1, SQLITE_TRANSIENT)
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     /// A persisted epoch rejects anchors from a replaced database or the old timestamp format.

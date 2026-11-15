@@ -129,9 +129,38 @@ struct EnumeratorTests {
         precondition((unauthenticated.error as NSError?)?.domain == NSFileProviderErrorDomain &&
                      (unauthenticated.error as NSError?)?.code == NSFileProviderError.notAuthenticated.rawValue,
                      "Authentication failure must remain distinct from permission denial")
-        await server.configure(["/": [root, folder], "/folder": [folder]])
+        // OpenCloud propagates ETags to every ancestor of a change.
+        let idleRequests = await server.requestCount()
+        await server.configure(["/": [root, folder], "/folder": [folder, changedChild]])
+        let idle = await changes(enumerator, since: first.anchor!.rawValue)
+        precondition(idle.error == nil)
+        let idleCost = await server.requestCount() - idleRequests
+        precondition(idleCost == 1, "An unchanged tree must cost one root listing, not one per known folder (was \(idleCost))")
+        let folderAfterRemoval = remote("folder", path: "/folder", directory: true, etag: "v2")
+        await server.configure(["/": [root, folderAfterRemoval], "/folder": [folderAfterRemoval]])
         let removed = await changes(enumerator, since: first.anchor!.rawValue)
         precondition(removed.deleted.map(\.rawValue).contains("child"), "Working set must report nested deletions")
+        // Listing a folder stores its subfolder's new ETag without listing the subfolder,
+        // so it must not hide the subfolder's changes from the next working-set pass.
+        let folderV3 = remote("folder", path: "/folder", directory: true, etag: "v3")
+        let sub = remote("sub", path: "/folder/sub", directory: true)
+        let leaf = remote("leaf", path: "/folder/sub/leaf")
+        await server.configure(["/": [root, folderV3], "/folder": [folderV3, sub], "/folder/sub": [sub, leaf]])
+        try await database.addItemMetadata(ItemMetadata(from: sub, parentOcId: "folder"))
+        try await database.addItemMetadata(ItemMetadata(from: leaf, parentOcId: "sub"))
+        let seeded = await changes(enumerator, since: removed.anchor!.rawValue)
+        precondition(seeded.error == nil)
+        let folderV4 = remote("folder", path: "/folder", directory: true, etag: "v4")
+        let subV2 = remote("sub", path: "/folder/sub", directory: true, etag: "v2")
+        await server.configure(["/": [root, folderV4], "/folder": [folderV4, subV2],
+                                "/folder/sub": [subV2, leaf, remote("late", path: "/folder/sub/late")]])
+        let folderEnumerator = FileProviderEnumerator(enumeratedItemIdentifier: NSFileProviderItemIdentifier("folder"), domain: domain, fpExtension: ext)
+        let browsed = await changes(folderEnumerator, since: seeded.anchor!.rawValue)
+        let browsedSub = await database.itemMetadata(ocId: "sub")
+        precondition(browsed.error == nil && browsedSub?.etag == "v2")
+        let afterBrowse = await changes(enumerator, since: browsed.anchor!.rawValue)
+        precondition(afterBrowse.updated.contains { $0.itemIdentifier.rawValue == "late" },
+                     "Listing a folder must not mark its subfolders as reconciled")
         let expired = await changes(enumerator, since: Data("old timestamp".utf8))
         precondition((expired.error as NSError?)?.code == NSFileProviderError.syncAnchorExpired.rawValue, "Legacy timestamp anchors must request full enumeration")
         let a = remote("a", path: "/a", directory: true)
@@ -146,7 +175,9 @@ struct EnumeratorTests {
         try await database.setDownloaded(ocId: "nested", downloaded: true)
         let moveAnchor = try await database.currentSyncAnchor()
         let moved = remote("moving", path: "/b/moving", directory: true)
-        await server.configure(["/": [root, a, b], "/a": [a], "/b": [b, moved],
+        let aAfterMove = remote("a", path: "/a", directory: true, etag: "v2")
+        let bAfterMove = remote("b", path: "/b", directory: true, etag: "v2")
+        await server.configure(["/": [root, aAfterMove, bAfterMove], "/a": [aAfterMove], "/b": [bAfterMove, moved],
                                 "/b/moving": [moved, remote("nested", path: "/b/moving/nested")]])
         let movedChanges = await changes(enumerator, since: moveAnchor)
         precondition(movedChanges.error == nil)

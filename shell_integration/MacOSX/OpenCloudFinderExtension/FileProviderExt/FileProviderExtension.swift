@@ -1084,8 +1084,43 @@ import UniformTypeIdentifiers
 
         // Tokens do not change item identity. Delta enumeration already refreshes
         // known folders, so credential delivery must never force a disk reimport.
-        if !unchanged || !previous.isAuthenticated { signalEnumerator() }
+        // The host resends credentials with a fresh generation on every token and
+        // spaces refresh (every 30 s), so neither the generation nor the token may
+        // trigger a signal: each one rescans every known folder on the server.
+        let accountChanged = previous.username != user || previous.userId != userId || previous.serverUrl != serverUrl
+            || previous.davPath != resolvedDavPath || previous.authType != resolvedAuthType
+        if accountChanged || !previous.isAuthenticated { signalEnumerator() }
+        else { checkForRemoteChanges() }
         return nil
+    }
+
+    private static let remoteCheckLock = NSLock()
+    private static var remoteChecksInFlight = Set<String>()
+
+    /// Cheap periodic probe, driven by the host's credential refresh: one Depth 0
+    /// PROPFIND of the space root. Only a changed root ETag starts a working-set pass.
+    func checkForRemoteChanges() {
+        let key = domain.identifier.rawValue
+        let started = Self.remoteCheckLock.withLock { Self.remoteChecksInFlight.insert(key).inserted }
+        guard started else { return }
+        Task {
+            defer { _ = Self.remoteCheckLock.withLock { Self.remoteChecksInFlight.remove(key) } }
+            guard let webdav = webdavClient, let database = database else { return }
+            // The Shares jail aggregates other spaces and may not propagate their ETags
+            // to its own root; its pass still only descends into changed shares.
+            if WebDAVClient.isVirtualSharesPath(readState(\.davPath) ?? "") {
+                signalEnumerator(for: .workingSet)
+                return
+            }
+            do {
+                let etag = try await webdav.etag(path: "/")
+                if await database.listedETag(ocId: ItemDatabase.rootContainerId) != etag {
+                    signalEnumerator(for: .workingSet)
+                }
+            } catch {
+                logger.error("Remote change check failed: \(fileProviderErrorDiagnostic(error), privacy: .public)")
+            }
+        }
     }
 
     /// Called by ClientCommunicationService when main app removes account
