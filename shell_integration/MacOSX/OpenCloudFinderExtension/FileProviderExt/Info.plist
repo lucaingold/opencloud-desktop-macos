@@ -4,6 +4,15 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <!-- Finder sidebar icon of the on-demand locations: OpenCloud logo as a template symbol (Assets.xcassets). -->
+            <key>CFBundleSymbolName</key>
+            <string>opencloud</string>
+        </dict>
+    </dict>
     <key>CFBundleDisplayName</key>
     <string>OpenCloud Desktop File Provider</string>
     <key>CFBundleExecutable</key>

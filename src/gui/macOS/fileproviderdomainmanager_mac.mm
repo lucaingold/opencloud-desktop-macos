@@ -76,6 +76,16 @@ static QString domainDisplayNameFromAccount(const Account *account)
            : QStringLiteral("%1 @ %2").arg(account->davDisplayName(), account->url().host());
 }
 
+// Finder shows "<app> - <name>", e.g. "OpenCloud - Persönlich", like "OpenCloud: Persönlich" in
+// Windows Explorer. Name the account only when several accounts would otherwise look alike.
+static QString domainDisplayName(const Account *account, const GraphApi::Space *space)
+{
+    if (AccountManager::instance()->accounts().size() > 1) {
+        return QStringLiteral("%1 (%2)").arg(space->displayName(), domainDisplayNameFromAccount(account));
+    }
+    return space->displayName();
+}
+
 // Private implementation class
 class API_AVAILABLE(macos(11.0)) FileProviderDomainManager::MacImplementation
 {
@@ -157,6 +167,7 @@ public:
         }
         // Shares is a virtual aggregation of other spaces. Its DAV root is
         // browsable, but it has no independent recycle bin or search scope.
+        const QString displayName = domainDisplayName(account.get(), space);
         const bool supportsSearch =
             space->drive().getDriveType() != QLatin1String("virtual") && !spaceComponent.isEmpty() && !spaceComponent.contains(QLatin1Char('/'));
         if (_registeredDomains.contains(domainId)) {
@@ -165,7 +176,8 @@ public:
                 return;
             }
             NSFileProviderDomain *existing = _registeredDomains.value(domainId);
-            bool capabilitiesCurrent = true;
+            // Re-adding a registered identifier updates its Finder name in place.
+            bool capabilitiesCurrent = QString::fromNSString(existing.displayName) == displayName;
             if (@available(macOS 26.0, *)) {
                 capabilitiesCurrent = existing.supportsStringSearchRequest == supportsSearch;
             }
@@ -189,9 +201,7 @@ public:
         });
         NSFileProviderDomain *domain = [[NSFileProviderDomain alloc]
             initWithIdentifier:domainId.toNSString()
-                   displayName:(personal ? domainDisplayNameFromAccount(account.get())
-                                         : QStringLiteral("%1 - %2").arg(space->displayName(), domainDisplayNameFromAccount(account.get())))
-                                   .toNSString()];
+                   displayName:displayName.toNSString()];
         domain.hidden = NO;
         if (@available(macOS 26.0, *)) {
             domain.supportsStringSearchRequest = supportsSearch;
