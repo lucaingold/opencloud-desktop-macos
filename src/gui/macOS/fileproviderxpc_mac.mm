@@ -52,7 +52,7 @@ static NSString *credentialSuiteIdentifier(const QString &appGroupIdentifier)
                                                    : appGroupIdentifier.toNSString();
     if (!suite.length) {
         const auto directory = QFileInfo(OCC::Utility::socketApiSocketPath()).dir();
-        suite = (directory.absolutePath().contains(QStringLiteral("/Group Containers/")) ? directory.dirName() : Resources::JsonTheme::instance().organizationDomain())
+        suite = (directory.absolutePath().contains(QStringLiteral("/Group Containers/")) ? directory.dirName() : OCC::Resources::JsonTheme::instance().organizationDomain())
                     .toNSString();
     }
     return suite;

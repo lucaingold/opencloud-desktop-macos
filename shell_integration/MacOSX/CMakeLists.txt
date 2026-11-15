@@ -56,10 +56,11 @@ add_custom_target( mac_fileprovider ALL
         "OC_APPLICATION_VERSION=${MIRALL_VERSION_STRING}"
         "OC_APPLICATION_BUILD_VERSION=${MIRALL_VERSION_FULL}"
         "DEVELOPMENT_TEAM=$ENV{APPLE_DEVELOPMENT_TEAM_ID}"
-        ${XCODE_DEPLOYMENT_TARGET}
     COMMENT "Building FileProviderExt (Virtual file system)"
     VERBATIM)
-add_dependencies(mac_fileprovider opencloud)
+# Both targets share SYMROOT and its Xcode build database, so they must not run in parallel.
+# FileProviderExt keeps its own macOS 26 deployment target from the project.
+add_dependencies(mac_fileprovider opencloud mac_overlayplugin)
 add_custom_command(TARGET mac_fileprovider POST_BUILD COMMAND ${CMAKE_COMMAND}
     ARGS -E copy_directory "${CMAKE_CURRENT_BINARY_DIR}/${XCODE_CONFIG}/FileProviderExt.appex" "$<TARGET_FILE_DIR:opencloud>/../PlugIns/FileProviderExt.appex")
 
