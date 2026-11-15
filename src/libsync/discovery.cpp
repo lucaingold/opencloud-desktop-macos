@@ -99,22 +99,15 @@ void ProcessDirectoryJob::process()
     //
     for (const auto &f : entries) {
         const auto &e = f.second;
-
-        PathTuple path;
-        path = _currentFolder.addName(f.first);
+        const PathTuple path = _currentFolder.addName(f.first);
 
         // If the filename starts with a . we consider it a hidden file
         // For windows, the hidden state is also discovered within the vio
         // local stat function.
         // Recall file shall not be ignored (#4420)
-        const bool isHidden = [&] {
-            if (Q_UNLIKELY(Theme::instance()->enableCernBranding())) {
-                return e.localEntry.isHidden() || (f.first[0] == QLatin1Char('.') && f.first != QLatin1String(".sys.admin#recall#"));
-            } else {
-                return e.localEntry.isHidden() || f.first[0] == QLatin1Char('.');
-            }
-        }();
-        if (handleExcluded(path._target, e.localEntry.name(), e.localEntry.isDirectory() || e.serverEntry.isDirectory(), isHidden, e.localEntry.isSymLink())) {
+        const bool isHidden = e.localEntry.isHidden() || f.first[0] == QLatin1Char('.');
+        if (handleExcluded(path._target, e.localEntry.name(), e.localEntry.isDirectory() || e.serverEntry.isDirectory(), isHidden, e.localEntry.isSymLink(),
+                e.serverEntry.isVaultFile())) {
             // the file only exists in the db
             if (!e.localEntry.isValid() && e.dbEntry.isValid()) {
                 qCWarning(lcDisco) << u"Removing db entry for non existing ignored file:" << path._original;
@@ -132,7 +125,7 @@ void ProcessDirectoryJob::process()
     QTimer::singleShot(0, _discoveryData, &DiscoveryPhase::scheduleMoreJobs);
 }
 
-bool ProcessDirectoryJob::handleExcluded(const QString &path, const QString &localName, bool isDirectory, bool isHidden, bool isSymlink)
+bool ProcessDirectoryJob::handleExcluded(const QString &path, const QString &localName, bool isDirectory, bool isHidden, bool isSymlink, bool isVaultFile)
 {
     auto excluded = _discoveryData->_excludes->traversalPatternMatch(path, isDirectory ? ItemTypeDirectory : ItemTypeFile);
 
@@ -153,7 +146,7 @@ bool ProcessDirectoryJob::handleExcluded(const QString &path, const QString &loc
         isInvalidPattern = true;
     }
 
-    if (excluded == CSYNC_NOT_EXCLUDED && !isSymlink) {
+    if (excluded == CSYNC_NOT_EXCLUDED && !isSymlink && !isVaultFile) {
         return false;
     } else if (excluded == CSYNC_FILE_SILENTLY_EXCLUDED) {
         Q_EMIT _discoveryData->silentlyExcluded(path);
@@ -167,6 +160,8 @@ bool ProcessDirectoryJob::handleExcluded(const QString &path, const QString &loc
     if (isSymlink) {
         /* Symbolic links are ignored. */
         item->_errorString = tr("Symbolic links are not supported in syncing.");
+    } else if (isVaultFile) {
+        item->_errorString = tr("Encrypted vault files are not synchronized because they are currently not supported by this application.");
     } else {
         switch (excluded) {
         case CSYNC_NOT_EXCLUDED:
@@ -245,7 +240,8 @@ void ProcessDirectoryJob::processFile(const PathTuple &path,
                               << u" | fileid: " << dbEntry.fileId() << u"//" << serverEntry.fileId() //
                               << u" | inode: " << dbEntry.inode() << u"/" << localEntry.inode() << u"/" //
                               << u" | type: " << dbEntry.type() << u"/" << localEntry.type() << u"/"
-                              << (serverEntry.isDirectory() ? ItemTypeDirectory : ItemTypeFile);
+                              << (serverEntry.isDirectory() ? ItemTypeDirectory : ItemTypeFile) //
+                              << u" | isShared: " << dbEntry.isShared() << u"//" << serverEntry.isShared(); //
 
     if (_discoveryData->isRenamed(path._original)) {
         qCDebug(lcDisco) << u"Ignoring renamed";
@@ -315,6 +311,7 @@ void ProcessDirectoryJob::processFileAnalyzeRemoteInfo(
     item->_remotePerm = serverEntry.remotePerm();
     item->_type = serverEntry.isDirectory() ? ItemTypeDirectory : ItemTypeFile;
     item->_etag = serverEntry.etag();
+    item->_isShared = serverEntry.isShared();
 
     // Check for missing server data
     if (!serverEntry.error().isEmpty()) {
@@ -362,7 +359,8 @@ void ProcessDirectoryJob::processFileAnalyzeRemoteInfo(
             } else {
                 item->setInstruction(CSYNC_INSTRUCTION_SYNC);
             }
-        } else if (dbEntry.remotePerm() != serverEntry.remotePerm() || dbEntry.fileId() != serverEntry.fileId()) {
+        } else if (dbEntry.remotePerm() != serverEntry.remotePerm() || dbEntry.fileId() != serverEntry.fileId()
+            || dbEntry.isShared() != serverEntry.isShared()) {
             item->setInstruction(CSYNC_INSTRUCTION_UPDATE_METADATA);
             item->_direction = SyncFileItem::Down;
         } else {
@@ -565,7 +563,8 @@ void ProcessDirectoryJob::processFileAnalyzeLocalInfo(
         }
 
         if (dbEntry.isVirtualFile() && !virtualFileDownload) {
-            item->_type = ItemTypeVirtualFile;
+            const bool localIsRegularFile = localEntry.isValid() && !localEntry.isDirectory() && !localEntry.isVirtualFile();
+            item->_type = localIsRegularFile ? ItemTypeFile : ItemTypeVirtualFile;
         }
         return modifiedOnServer;
     }();

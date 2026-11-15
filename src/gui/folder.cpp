@@ -28,17 +28,17 @@
 #include "folderwatcher.h"
 #include "gui/accountsettings.h"
 #include "gui/folderdefinition.h"
+#include "guiutility.h"
 #include "libsync/graphapi/spacesmanager.h"
 #include "libsync/vfs/vfs.h"
 #include "localdiscoverytracker.h"
+#include "resources/jsontheme.h"
 #include "scheduling/syncscheduler.h"
 #include "settingsdialog.h"
 #include "socketapi/socketapi.h"
 #include "syncengine.h"
 #include "syncresult.h"
-#include "syncrunfilelog.h"
 #include "theme.h"
-#include "guiutility.h"
 
 #ifdef Q_OS_WIN
 #include "common/utility_win.h"
@@ -75,7 +75,6 @@ Folder::Folder(const FolderDefinition &definition, const AccountStatePtr &accoun
     , _accountState(accountState)
     , _definition(definition)
     , _journal(_definition.absoluteJournalPath())
-    , _fileLog(new SyncRunFileLog)
     , _vfs(vfs.release())
 {
     _timeSinceLastSyncStart.start();
@@ -91,12 +90,28 @@ Folder::Folder(const FolderDefinition &definition, const AccountStatePtr &accoun
         _engine.reset(new SyncEngine(_accountState->account(), webDavUrl(), path(), {}, &_journal));
         // pass the setting if hidden files are to be ignored, will be read in csync_update
         _engine->setIgnoreHiddenFiles(_definition.ignoreHiddenFiles);
-
         if (!_engine->loadDefaultExcludes()) {
             qCWarning(lcFolder, "Could not read system exclude file");
+            _syncResult.appendErrorString(tr("Failed to load excludes"));
+            setSyncState(SyncResult::SetupError);
+            return;
         }
 
         connect(_accountState.data(), &AccountState::isConnectedChanged, this, &Folder::canSyncChanged);
+
+        auto *context = new QObject(this);
+        // once we successfully retrieved the private link we can delete the context to disconnect the signal
+        connect(_accountState->account().data(), &Account::capabilitiesChanged, context, [context, this] {
+            if (_accountState->account()->capabilities().privateLinkPropertyAvailable()) {
+                fetchPrivateLinkUrl(_accountState->account(), webDavUrl(), {}, this, [context, this](const QUrl &privateLinkUrl) {
+                    _webUrl = privateLinkUrl;
+                    Q_EMIT webUrlChanged();
+                    context->deleteLater();
+                });
+            } else {
+                context->deleteLater();
+            }
+        });
 
         // use a direct connection, the folder status has to be up to date
         connect(_engine.data(), &SyncEngine::finished, this, &Folder::slotSyncFinished, Qt::DirectConnection);
@@ -155,6 +170,11 @@ Result<void, QString> Folder::checkPathLength(const QString &path)
 GraphApi::Space *Folder::space() const
 {
     return _accountState->account()->spacesManager()->space(_definition.spaceId());
+}
+
+QUrl Folder::webUrl() const
+{
+    return _webUrl;
 }
 
 bool Folder::checkLocalPath()
@@ -255,7 +275,7 @@ void Folder::prepareFolder(const QString &path, const QString &displayName, cons
             }
             out << u"InfoTip="_s;
             if (description.isEmpty()) {
-                out << Theme::instance()->appNameGUI();
+                out << Resources::JsonTheme::instance().applicationDisplayName();
                 if (!displayName.isEmpty()) {
                     out << u" - "_s << displayName;
                 }
@@ -327,7 +347,12 @@ bool Folder::ignoreHiddenFiles()
 
 void Folder::setIgnoreHiddenFiles(bool ignore)
 {
+    if (_definition.ignoreHiddenFiles == ignore) {
+        return;
+    }
     _definition.ignoreHiddenFiles = ignore;
+
+    reloadExcludes();
 }
 
 QString Folder::cleanPath() const
@@ -398,6 +423,9 @@ void Folder::setSyncState(SyncResult::Status state)
         qCDebug(lcFolder) << u"State of" << path() << u"changed to" << state << u"old state" << _syncResult.status();
         _syncResult.setStatus(state);
         Q_EMIT syncStateChange();
+        if (state == SyncResult::SetupError) {
+            setIsReady(false);
+        }
         if (oldIsRunning != isSyncRunning()) {
             Q_EMIT isSyncRunningChanged();
         }
@@ -519,8 +547,8 @@ void Folder::startVfs()
 
     VfsSetupParams vfsParams(_accountState->account(), webDavUrl(), _definition.spaceId(), displayName(), _engine.get());
     vfsParams.journal = &_journal;
-    vfsParams.providerDisplayName = Theme::instance()->appNameGUI();
-    vfsParams.providerName = Theme::instance()->appName();
+    vfsParams.providerDisplayName = Resources::JsonTheme::instance().applicationDisplayName();
+    vfsParams.providerName = Resources::JsonTheme::instance().applicationName();
     vfsParams.providerVersion = Version::version();
     vfsParams.socketPath = Utility::socketApiSocketPath();
 
@@ -561,7 +589,6 @@ void Folder::startVfs()
     connect(_vfs.data(), &Vfs::error, this, [this](const QString &error) {
         _syncResult.appendErrorString(error);
         setSyncState(SyncResult::SetupError);
-        setIsReady(false);
     });
 
     slotNextSyncFullLocalDiscovery();
@@ -756,11 +783,6 @@ bool Folder::isFileExcludedRelative(const QString &relativePath) const
     return isFileExcludedAbsolute(path() + relativePath);
 }
 
-void Folder::openInWebBrowser()
-{
-    fetchPrivateLinkUrl(_accountState->account(), webDavUrl(), {}, this, [](const QUrl &url) { Utility::openBrowser(url, nullptr); });
-}
-
 void Folder::wipeForRemoval()
 {
     // we can't acces those variables
@@ -801,9 +823,6 @@ void Folder::wipeForRemoval()
     QFile::remove(stateDbFile + QStringLiteral("-wal"));
     QFile::remove(stateDbFile + QStringLiteral("-journal"));
 
-    // remove the sync log
-    QFile::remove(u"%1/.OpenCloudSync.log"_s.arg(_canonicalLocalPath));
-
 #ifdef Q_OS_WIN
     // remove the desktop ini
     QFile::remove(u"%1/Desktop.ini"_s.arg(_canonicalLocalPath));
@@ -814,12 +833,47 @@ void Folder::wipeForRemoval()
     _vfs.reset(nullptr); // warning: folder now in an invalid state
 }
 
-bool Folder::reloadExcludes()
+void Folder::reloadExcludes()
 {
-    if (!_engine) {
-        return true;
+    auto doReload = [this](bool startSheduler) {
+        // The hidden items were skipped by the previous runs, so they are not in the local
+        // database and the remote etags did not change. Rediscover both sides, the same way a
+        // change of the ignore list does.
+        _journal.forceRemoteDiscoveryNextSync();
+
+        slotNextSyncFullLocalDiscovery();
+
+        if (_engine) {
+            if (!_engine->reloadExcludes()) {
+                _syncResult.appendErrorString(tr("Failed to load excludes"));
+                setSyncState(SyncResult::SetupError);
+            }
+            _engine->setIgnoreHiddenFiles(_definition.ignoreHiddenFiles);
+
+            // the folder watcher might need to be restarted to start watching hidden files
+            if (_folderWatcher) {
+                _folderWatcher->restart();
+            }
+        }
+        if (startSheduler) {
+            FolderMan::instance()->scheduler()->start();
+        }
+    };
+
+    if (FolderMan::instance()->scheduler()->currentSync() == this) {
+        const bool wasRunning = FolderMan::instance()->scheduler()->isRunning();
+        FolderMan::instance()->scheduler()->stop();
+        connect(
+            this, &Folder::syncFinished, this,
+            [doReload, wasRunning, this] {
+                doReload(wasRunning);
+                FolderMan::instance()->scheduler()->enqueueFolder(this);
+            },
+            static_cast<Qt::ConnectionType>(Qt::SingleShotConnection | Qt::QueuedConnection));
+        FolderMan::instance()->scheduler()->terminateCurrentSync(tr("Reloading excludes on folder »%1«").arg(displayName()));
+    } else {
+        doReload(false);
     }
-    return _engine->reloadExcludes();
 }
 
 void Folder::startSync()
@@ -842,15 +896,6 @@ void Folder::startSync()
     setSyncState(SyncResult::SyncRunning);
 
     qCInfo(lcFolder) << u"*** Start syncing " << displayName() << u"client version" << Theme::instance()->aboutVersions(Theme::VersionFormat::OneLiner);
-
-    _fileLog->start(path());
-
-    if (!reloadExcludes()) {
-        slotSyncError(tr("Could not read system exclude file"));
-        QMetaObject::invokeMethod(
-            this, [this] { slotSyncFinished(false); }, Qt::QueuedConnection);
-        return;
-    }
 
     setDirtyNetworkLimits();
 
@@ -877,7 +922,6 @@ void Folder::startSync()
         _localDiscoveryTracker->startSyncFullDiscovery();
     }
 
-    _engine->setIgnoreHiddenFiles(_definition.ignoreHiddenFiles);
     _engine->startSync();
 }
 
@@ -929,7 +973,6 @@ void Folder::slotSyncFinished(bool success)
     } else {
         qCInfo(lcFolder) << u"SyncEngine finished without problem.";
     }
-    _fileLog->finish();
 
     auto anotherSyncNeeded = false;
 
@@ -1004,7 +1047,6 @@ void Folder::slotItemCompleted(const SyncFileItemPtr &item)
 
     _syncResult.processCompletedItem(item);
 
-    _fileLog->logItem(*item);
     Q_EMIT ProgressDispatcher::instance()->itemCompleted(this, item);
 }
 
@@ -1064,7 +1106,7 @@ void Folder::slotWatcherUnreliable(const QString &message)
 {
     qCWarning(lcFolder) << u"Folder watcher for" << path() << u"became unreliable:" << message;
 
-    QMessageBox *msgBox = new FontIconMessageBox({Resources::FontIcon::DefaultGlyphes::Info}, Theme::instance()->appNameGUI(),
+    QMessageBox *msgBox = new FontIconMessageBox({Resources::FontIcon::DefaultGlyphes::Info}, Resources::JsonTheme::instance().applicationDisplayName(),
         tr("Changes in synchronized folders could not be tracked reliably.\n"
            "\n"
            "This means that the synchronization client might not upload local changes "
@@ -1100,7 +1142,6 @@ void Folder::registerFolderWatcher()
     connect(_folderWatcher.data(), &FolderWatcher::becameUnreliable,
         this, &Folder::slotWatcherUnreliable);
     _folderWatcher->init(path());
-    _folderWatcher->startNotificatonTest(path() + QLatin1String(".OpenCloudSync.log"));
 }
 
 bool Folder::virtualFilesEnabled() const

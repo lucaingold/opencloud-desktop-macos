@@ -198,11 +198,10 @@ void DiscoverySingleLocalDirectoryJob::run() {
     const auto localPath = FileSystem::toFilesystemPath(_localPath);
     QVector<LocalInfo> results;
     for (const auto &dirent : std::filesystem::directory_iterator{localPath, ec}) {
-        ItemType type = LocalInfo::typeFromDirectoryEntry(dirent);
-        if (type == ItemTypeUnsupported) {
+        auto info = _vfs->statTypeVirtualFile(dirent);
+        if (info.type() == ItemTypeUnsupported) {
             continue;
         }
-        auto info = _vfs->statTypeVirtualFile(dirent, type);
         if (!info.isValid()) {
             continue;
         }
@@ -244,13 +243,15 @@ void DiscoverySingleDirectoryJob::start()
     // Start the actual HTTP job
     _proFindJob = new PropfindJob(_account, _baseUrl, _subPath, PropfindJob::Depth::One, this);
     _proFindJob->setProperties({
-        "resourcetype"_ba,
-        "getlastmodified"_ba,
-        "getcontentlength"_ba,
-        "getetag"_ba,
-        "http://owncloud.org/ns:id"_ba,
-        "http://owncloud.org/ns:permissions"_ba,
-        "http://owncloud.org/ns:checksums"_ba,
+        "resourcetype"_ba, //
+        "getlastmodified"_ba, //
+        "getcontentlength"_ba, //
+        "getetag"_ba, //
+        "http://owncloud.org/ns:id"_ba, //
+        "http://owncloud.org/ns:permissions"_ba, //
+        "http://owncloud.org/ns:share-types"_ba, //
+        "http://owncloud.org/ns:checksums"_ba, //
+        "ocrclone:integrity-id"_ba // vault files
     });
 
     QObject::connect(_proFindJob, &PropfindJob::directoryListingIterated,

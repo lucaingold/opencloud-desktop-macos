@@ -62,8 +62,5 @@ namespace Utility {
     OPENCLOUD_GUI_EXPORT void showFinderSyncExtensionManagementInterface();
 #endif
 
-    OPENCLOUD_GUI_EXPORT void markDirectoryAsSyncRoot(const QString &path, const QUuid &accountUuid);
-    std::pair<QString, QUuid> getDirectorySyncRootMarkings(const QString &path);
-    void unmarkDirectoryAsSyncRoot(const QString &path);
 } // namespace Utility
 } // namespace OCC

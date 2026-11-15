@@ -13,6 +13,7 @@
  */
 
 #include "generalsettings.h"
+
 #include "ui_generalsettings.h"
 
 #include "common/restartmanager.h"
@@ -25,6 +26,7 @@
 #include "gui/translations.h"
 #include "libsync/configfile.h"
 #include "libsync/theme.h"
+#include "resources/jsontheme.h"
 
 #ifdef Q_OS_MAC
 #include "macOS/fileprovider.h"
@@ -145,8 +147,7 @@ void GeneralSettings::saveMiscSettings()
 
 void GeneralSettings::slotToggleLaunchOnStartup(bool enable)
 {
-    Theme *theme = Theme::instance();
-    Utility::setLaunchOnStartup(theme->appName(), theme->appNameGUI(), enable);
+    Utility::setLaunchOnStartup(Resources::JsonTheme::instance().applicationName(), Resources::JsonTheme::instance().applicationDisplayName(), enable);
 }
 
 void GeneralSettings::slotIgnoreFilesEditor()
@@ -173,12 +174,12 @@ void GeneralSettings::reloadConfig()
     if (Utility::isWindows() && Utility::isInstalledByStore()) {
         _ui->autostartCheckBox->setVisible(false);
     } else {
-        if (Utility::hasSystemLaunchOnStartup(Theme::instance()->appName())) {
+        if (Utility::hasSystemLaunchOnStartup(Resources::JsonTheme::instance().applicationName())) {
             _ui->autostartCheckBox->setChecked(true);
             _ui->autostartCheckBox->setDisabled(true);
             _ui->autostartCheckBox->setToolTip(tr("You cannot disable autostart because system-wide autostart is enabled."));
         } else {
-            const bool hasAutoStart = Utility::hasLaunchOnStartup(Theme::instance()->appName());
+            const bool hasAutoStart = Utility::hasLaunchOnStartup(Resources::JsonTheme::instance().applicationName());
             // make sure the binary location is correctly set
             slotToggleLaunchOnStartup(hasAutoStart);
             _ui->autostartCheckBox->setChecked(hasAutoStart);

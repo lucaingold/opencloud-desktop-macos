@@ -29,12 +29,14 @@
 #include "folder.h"
 #include "folderman.h"
 #include "guiutility.h"
+#include "resources/jsontheme.h"
 #include "syncengine.h"
 #include "syncfileitem.h"
 #include "theme.h"
 #include "vfs/hydrationjob.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -502,7 +504,8 @@ void SocketApi::command_VERSION(const QString &, SocketListener *listener)
 
 void SocketApi::command_SHARE_MENU_TITLE(const QString &, SocketListener *listener)
 {
-    listener->sendMessage(QLatin1String("SHARE_MENU_TITLE:") + tr("Share with %1", "parameter is OpenCloud").arg(Theme::instance()->appNameGUI()));
+    listener->sendMessage(
+        QLatin1String("SHARE_MENU_TITLE:") + tr("Share with %1", "parameter is OpenCloud").arg(Resources::JsonTheme::instance().applicationDisplayName()));
 }
 
 // Fetches the private link url asynchronously and then calls the target slot
@@ -725,10 +728,9 @@ void SocketApi::command_V2_GET_CLIENT_ICON(const QSharedPointer<SocketApiJobV2> 
     }
 
     QByteArray data;
-    const Theme *theme = Theme::instance();
     // return an empty answer if the end point was disabled
-    if (theme->enableSocketApiIconSupport()) {
-        const QIcon appIcon = theme->applicationIcon();
+    if (Theme::instance()->enableSocketApiIconSupport()) {
+        const QIcon appIcon = Resources::JsonTheme::instance().applicationIcon();
         qCDebug(lcSocketApi) << Q_FUNC_INFO << u" got icon from theme: " << appIcon;
 
         // convert to pixmap (might be smaller if size is not available)
@@ -771,12 +773,16 @@ void OCC::SocketApi::openPrivateLink(const QUrl &link)
 
 void SocketApi::command_GET_STRINGS(const QString &argument, SocketListener *listener)
 {
-    static std::array<std::pair<QString, QString>, 5> strings { {
-        { QStringLiteral("SHARE_MENU_TITLE"), tr("Share...") },
-        { QStringLiteral("CONTEXT_MENU_TITLE"), Theme::instance()->appNameGUI() },
-        { QStringLiteral("COPY_PRIVATE_LINK_MENU_TITLE"), tr("Copy private link to clipboard") },
-        { QStringLiteral("EMAIL_PRIVATE_LINK_MENU_TITLE"), tr("Send private link by email...") },
-    } };
+    static std::array<std::pair<QString, QString>, 5> strings{{
+        {QStringLiteral("SHARE_MENU_TITLE"), tr("Share...")},
+        {QStringLiteral("CONTEXT_MENU_TITLE"), Resources::JsonTheme::instance().applicationDisplayName()},
+        {QStringLiteral("COPY_PRIVATE_LINK_MENU_TITLE"), tr("Copy private link to clipboard")},
+        {QStringLiteral("EMAIL_PRIVATE_LINK_MENU_TITLE"), tr("Send private link by email...")},
+#ifdef Q_OS_WIN
+        // an icon resource as used by the Windows Explorer integration
+        {QStringLiteral("CONTEXT_MENU_ICON"), QDir::toNativeSeparators(QCoreApplication::applicationFilePath()) + QStringLiteral(",0")},
+#endif
+    }};
     listener->sendMessage(QStringLiteral("GET_STRINGS:BEGIN"));
     for (auto key_value : strings) {
         if (argument.isEmpty() || argument == key_value.first) {

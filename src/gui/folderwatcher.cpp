@@ -64,6 +64,7 @@ FolderWatcher::~FolderWatcher()
 void FolderWatcher::init(const QString &root)
 {
     Q_ASSERT(!_d);
+    _root = root;
     _d.reset(new FolderWatcherPrivate(this, root));
 }
 
@@ -101,52 +102,6 @@ bool FolderWatcher::isReliable() const
     return _isReliable;
 }
 
-void FolderWatcher::startNotificatonTest(const QString &path)
-{
-#ifdef Q_OS_MAC
-    // Testing the folder watcher on OSX is harder because the watcher
-    // automatically discards changes that were performed by our process.
-    // It would still be useful to test but the OSX implementation
-    // is deferred until later.
-    return;
-#endif
-
-    Q_ASSERT(_testNotificationPath.isEmpty());
-    Q_ASSERT(!path.isEmpty());
-    _testNotificationPath = path;
-
-    // Don't do the local file modification immediately:
-    // wait for FolderWatchPrivate::_ready
-    startNotificationTestWhenReady();
-}
-
-void FolderWatcher::startNotificationTestWhenReady()
-{
-    if (!_testNotificationPath.isEmpty()) {
-        // we already received the notification
-        return;
-    }
-    if (!_d->isReady()) {
-        QTimer::singleShot(1s, this, &FolderWatcher::startNotificationTestWhenReady);
-        return;
-    }
-
-    if (OC_ENSURE(QFile::exists(_testNotificationPath))) {
-        const auto mtime = FileSystem::getModTime(_testNotificationPath);
-        FileSystem::setModTime(_testNotificationPath, mtime + 1);
-    } else {
-        QFile f(_testNotificationPath);
-        f.open(QIODevice::WriteOnly | QIODevice::Append);
-    }
-
-    QTimer::singleShot(notificationTimeoutC + 5s, this, [this]() {
-        if (!_testNotificationPath.isEmpty())
-            Q_EMIT becameUnreliable(tr("The watcher did not receive a test notification."));
-        _testNotificationPath.clear();
-    });
-}
-
-
 int FolderWatcher::testLinuxWatchCount() const
 {
 #ifdef Q_OS_LINUX
@@ -165,10 +120,6 @@ void FolderWatcher::addChanges(QSet<QString> &&paths)
     // ------- handle ignores:
     auto it = paths.cbegin();
     while (it != paths.cend()) {
-        // we cause a file change from time to time to check whether the folder watcher works as expected
-        if (!_testNotificationPath.isEmpty() && Utility::fileNamesEqual(*it, _testNotificationPath)) {
-            _testNotificationPath.clear();
-        }
         if (pathIsIgnored(*it)) {
             it = paths.erase(it);
         } else {
@@ -190,6 +141,13 @@ QSet<QString> FolderWatcher::popChangeSet()
     // stop the timer as we pop all queued changes
     _timer.stop();
     return std::move(_changeSet);
+}
+
+void FolderWatcher::restart()
+{
+    // ensure the old one is gone before creating a new one
+    _d.reset();
+    _d.reset(new FolderWatcherPrivate(this, _root));
 }
 
 } // namespace OCC

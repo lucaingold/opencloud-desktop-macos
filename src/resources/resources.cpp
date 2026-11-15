@@ -15,6 +15,7 @@
 #include "resources/resources.h"
 
 #include "fonticon.h"
+#include "resources/jsontheme.h"
 #include "resources/qmlresources.h"
 #include "resources/template.h"
 #include "resources/themewatcher.h"
@@ -28,6 +29,7 @@
 #include <QLoggingCategory>
 #include <QPalette>
 
+using namespace Qt::Literals::StringLiterals;
 using namespace OCC;
 using namespace Resources;
 
@@ -50,16 +52,6 @@ QString vanillaThemePath()
 {
     return QStringLiteral(":/client/OpenCloud/theme");
 }
-
-QString brandThemePath()
-{
-    return QStringLiteral(":/client/" APPLICATION_SHORTNAME "/theme");
-}
-}
-
-bool Resources::isVanillaTheme()
-{
-    return std::string_view(APPLICATION_SHORTNAME).starts_with("OpenCloud");
 }
 
 bool OCC::Resources::isUsingDarkTheme()
@@ -71,11 +63,9 @@ bool OCC::Resources::isUsingDarkTheme()
  * helper to load a icon from either the icon theme the desktop provides or from
  * the apps Qt resources.
  */
-QIcon OCC::Resources::loadIcon(const QString &flavor, const QString &name, IconType iconType)
+QIcon OCC::Resources::loadIcon(const QString &flavor, const QString &name)
 {
-    // prevent recusion
-    const bool useCoreIcon = (iconType == IconType::VanillaIcon) || isVanillaTheme();
-    const QString path = QStringLiteral("%1/%2/%3").arg(useCoreIcon ? vanillaThemePath() : brandThemePath(), flavor, name);
+    const QString path = QStringLiteral("%1/%2/%3").arg(vanillaThemePath(), flavor, name);
     QIcon &cached = iconCache->_cache[path]; // Take reference, this will also "set" the cache entry
     if (cached.isNull()) {
         const QString svg = QStringLiteral("%1.svg").arg(path);
@@ -104,25 +94,10 @@ QIcon OCC::Resources::loadIcon(const QString &flavor, const QString &name, IconT
         }
     }
     if (cached.isNull()) {
-        if (!useCoreIcon && iconType == IconType::BrandedIconWithFallbackToVanillaIcon) {
-            return loadIcon(flavor, name, IconType::VanillaIcon);
-        }
         qCWarning(lcResources) << u"Failed to locate the icon" << path;
         Q_ASSERT(false);
     }
     return cached;
-}
-
-QColor Resources::tint()
-{
-    static QColor lilac{"#E2BAFF"};
-    static QColor petrol{"#20434F"};
-    return isUsingDarkTheme() ? lilac : petrol;
-}
-
-QIcon OCC::Resources::themeUniversalIcon(const QString &name, IconType iconType)
-{
-    return loadIcon(QStringLiteral("universal"), name, iconType);
 }
 
 CoreImageProvider::CoreImageProvider()
@@ -137,8 +112,17 @@ QPixmap CoreImageProvider::requestPixmap(const QString &id, QSize *size, const Q
     }
 
     QIcon icon;
-    if (qmlIcon.theme == QLatin1String("universal")) {
-        icon = themeUniversalIcon(qmlIcon.iconName);
+    if (qmlIcon.theme == "urlbutton"_L1) {
+        bool ok = false;
+        const auto index = qmlIcon.iconName.toInt(&ok);
+        const auto buttons = JsonTheme::instance().urlButtons();
+        if (!ok || index < 0 || index >= buttons.size()) {
+            qCWarning(lcResources) << u"Invalid urlbutton index:" << qmlIcon.iconName;
+            return {};
+        }
+        icon = buttons.at(index).icon;
+    } else if (qmlIcon.theme == "jsontheme"_L1) {
+        icon = JsonTheme::instance().property(qmlIcon.iconName.toUtf8().constData()).value<QIcon>();
     } else if (qmlIcon.theme == QLatin1String("fontawesome")) {
         Q_ASSERT(qmlIcon.iconName.length() == 1);
         icon = FontIcon(qmlIcon.iconName.front(), qmlIcon.size, qmlIcon.color);

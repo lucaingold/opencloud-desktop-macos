@@ -15,8 +15,8 @@
 #pragma once
 
 #include "libsync/common/syncjournaldb.h"
-#include "libsync/discoveryinfo.h"
 #include "libsync/discoveryphase.h"
+#include "libsync/localinfo.h"
 #include "libsync/syncfileitem.h"
 
 #include <deque>
@@ -141,8 +141,7 @@ private:
 
     // return true if the file is excluded.
     // path is the full relative path of the file. localName is the base name of the local entry.
-    bool handleExcluded(const QString &path, const QString &localName, bool isDirectory,
-        bool isHidden, bool isSymlink);
+    bool handleExcluded(const QString &path, const QString &localName, bool isDirectory, bool isHidden, bool isSymlink, bool isVaultFile);
 
     /** Reconcile local/remote/db information for a single item.
      *

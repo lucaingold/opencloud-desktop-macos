@@ -41,7 +41,11 @@ public:
 
     QString error() const;
 
+    bool isVaultFile() const;
+
     bool isValid() const;
+
+    bool isShared() const;
 
 private:
     QExplicitlySharedDataPointer<RemoteInfoData> d;

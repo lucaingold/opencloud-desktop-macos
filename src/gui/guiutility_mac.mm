@@ -23,6 +23,7 @@
 #include "macOS/fileprovider.h"
 
 #include "libsync/theme.h"
+#include "resources/jsontheme.h"
 
 #include <QProcess>
 
@@ -62,8 +63,8 @@ void Utility::startShellIntegration()
         return !output.isEmpty() && !output.contains(QStringLiteral("no matches"));
     };
 
-    QString finderSyncBundleId = Theme::instance()->orgDomainName() + QStringLiteral(".FinderSyncExt");
-    QString fileProviderBundleId = Theme::instance()->orgDomainName() + QStringLiteral(".FileProviderExt");
+    QString finderSyncBundleId = Resources::JsonTheme::instance().organizationDomain() + QStringLiteral(".FinderSyncExt");
+    QString fileProviderBundleId = Resources::JsonTheme::instance().organizationDomain() + QStringLiteral(".FileProviderExt");
 
     // Register FinderSyncExt only if not already registered
     // Re-registering can reset the user's enabled/disabled preference
@@ -104,7 +105,7 @@ QString Utility::socketApiSocketPath()
     // 2. Team ID from code signing (if signed)
     // 3. Plain domain without prefix (dev builds)
 
-    QString revDomain = Theme::instance()->orgDomainName();
+    QString revDomain = Resources::JsonTheme::instance().organizationDomain();
     
     // Try to get team identifier from code signing at runtime
     auto getTeamIdentifierFromSigning = []() -> QString {
@@ -197,7 +198,7 @@ bool Utility::isFinderSyncExtensionEnabled()
     // Check if our FinderSync extension is enabled by querying pluginkit
     // pluginkit -m output format: "+/-  bundle.id(version)"
     // "+" prefix = enabled, "-" prefix = disabled
-    QString bundleId = Theme::instance()->orgDomainName() + QStringLiteral(".FinderSyncExt");
+    QString bundleId = Resources::JsonTheme::instance().organizationDomain() + QStringLiteral(".FinderSyncExt");
 
     QProcess process;
     process.start(QStringLiteral("pluginkit"), {QStringLiteral("-m"), QStringLiteral("-i"), bundleId});

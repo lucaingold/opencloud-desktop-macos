@@ -53,10 +53,17 @@ if(UNIT_TESTING)
 endif()
 include(CTest)
 
-include(OCBundleResources)
 include(OCApplyCommonSettings)
 
-include("${CMAKE_CURRENT_LIST_DIR}/THEME.cmake")
+if(BETA_CHANNEL_BUILD)
+    # copy the beta theme to the bin directory so we can use the beta theme during development
+    configure_file("${PROJECT_SOURCE_DIR}/beta.json" "${CMAKE_CURRENT_BINARY_DIR}/bin/opencloud_theme.json" COPYONLY)
+    if(APPLE)
+        list(APPEND OPENCLOUD_BUNDLED_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/bin/opencloud_theme.json")
+    endif()
+endif()
+
+option( WITH_CRASHREPORTER "Build crashreporter" OFF )
 
 if(NOT WITH_CRASHREPORTER)
     message(STATUS "Build of crashreporter disabled.")
@@ -90,8 +97,8 @@ message(STATUS "GIT_SHA1 ${GIT_SHA1}")
 ## -DNO_MSG_HANDLER=ON
 option(NO_MSG_HANDLER "Don't redirect QDebug outputs to the log window/file" OFF)
 
-if (APPLE)
-    # this option builds the shell integration, currently only available on MacOS
+if (APPLE OR MSVC)
+    # this option builds the shell integration, currently only available on macOS and Windows
     ## -DBUILD_SHELL_INTEGRATION=OFF
     option(BUILD_SHELL_INTEGRATION "BUILD_SHELL_INTEGRATION" ON)
 endif()
@@ -154,16 +161,6 @@ endif()
 find_package(ZLIB REQUIRED)
 find_package(SQLite3 3.9.0 REQUIRED)
 
-# in the ownBrander themes, the icon files are named after the shortname
-# the theme included in this repository defines a custom icon name, therefore we set the shortname as a fallback if the
-# theme does not define the variable
-if (NOT DEFINED APPLICATION_ICON_NAME)
-    set(APPLICATION_ICON_NAME "${APPLICATION_SHORTNAME}")
-endif()
-
-file(GLOB_RECURSE OPENCLOUD_ICONS "${OEM_THEME_DIR}/theme/colored/*-${APPLICATION_ICON_NAME}-icon.png")
-MESSAGE(STATUS "OPENCLOUD_ICONS: ${APPLICATION_ICON_NAME}: ${OPENCLOUD_ICONS}")
-
 add_subdirectory(src)
 if(IS_DIRECTORY ${CMAKE_SOURCE_DIR}/admin)
     add_subdirectory(admin)
@@ -184,5 +181,15 @@ if(ECM_VERSION VERSION_GREATER_EQUAL 5.79)
 else()
     message(WARNING "ECM ${ECM_VERSION} too old, cannot install clang-format git hook")
 endif()
+
+# Target to generate the base translation file with all translatable strings (translations/desktop_en.ts)
+add_custom_target(update_translations
+    COMMAND ${CMAKE_COMMAND}
+        -DLUPDATE=$<TARGET_FILE:Qt::lupdate>
+        -DTS_FILE=${CMAKE_SOURCE_DIR}/translations/desktop_en.ts
+        -DSRC_DIR=${CMAKE_SOURCE_DIR}
+        -DWAE=FALSE
+        -P ${CMAKE_SOURCE_DIR}/cmake/run_lupdate.cmake
+)
 
 feature_summary(WHAT ALL FATAL_ON_MISSING_REQUIRED_PACKAGES INCLUDE_QUIET_PACKAGES)

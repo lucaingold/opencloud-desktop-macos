@@ -21,18 +21,6 @@
 
 namespace OCC::Resources {
 Q_NAMESPACE_EXPORT(OPENCLOUD_RESOURCES_EXPORT)
-/**
- * Wehther we allow a fallback to a vanilla icon
- */
-enum class IconType { BrandedIcon, BrandedIconWithFallbackToVanillaIcon, VanillaIcon };
-Q_ENUM_NS(IconType);
-
-
-/**
- *
- * @return Whether we are using the vanilla theme
- */
-bool OPENCLOUD_RESOURCES_EXPORT isVanillaTheme();
 
 /**
  * Whether use the dark icon theme
@@ -40,14 +28,7 @@ bool OPENCLOUD_RESOURCES_EXPORT isVanillaTheme();
  */
 bool OPENCLOUD_RESOURCES_EXPORT isUsingDarkTheme();
 
-QIcon OPENCLOUD_RESOURCES_EXPORT loadIcon(const QString &flavor, const QString &name, IconType iconType);
-
-QColor OPENCLOUD_RESOURCES_EXPORT tint();
-
-/**
- * Returns a universal (non color schema aware) icon.
- */
-QIcon OPENCLOUD_RESOURCES_EXPORT themeUniversalIcon(const QString &name, IconType iconType = IconType::BrandedIcon);
+QIcon OPENCLOUD_RESOURCES_EXPORT loadIcon(const QString &flavor, const QString &name);
 
 class OPENCLOUD_RESOURCES_EXPORT CoreImageProvider : public QQuickImageProvider
 {

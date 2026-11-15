@@ -502,17 +502,42 @@ public:
 protected:
     QNetworkReply *createRequest(Operation op, const QNetworkRequest &request,
         QIODevice *outgoingData = nullptr) override;
+
+    friend class FakeAMProxy;
+};
+
+// in the tests we only use one shared FakeAM
+// CheckServerJobFactory::createFromAccount however expects a temporary nam and deletes it
+// FakeAMProxy prevents the deletion of the nam
+class FakeAMProxy : public OCC::AccessManager
+{
+public:
+    explicit FakeAMProxy(FakeAM *target, QObject *parent = nullptr)
+        : OCC::AccessManager(parent)
+        , _target(target)
+    {
+    }
+
+protected:
+    QNetworkReply *createRequest(Operation op, const QNetworkRequest &request, QIODevice *outgoingData = nullptr) override
+    {
+        Q_ASSERT(_target);
+        return _target->createRequest(op, request, outgoingData);
+    }
+
+private:
+    QPointer<FakeAM> _target;
 };
 
 class FakeCredentials : public OCC::AbstractCredentials
 {
 public:
-    FakeCredentials(OCC::AccessManager *am)
-        : _am { am }
+    FakeCredentials(FakeAM *am)
+        : _am{am}
     {
     }
 
-    OCC::AccessManager *createAM() const override { return _am; }
+    OCC::AccessManager *createAM() const override { return new FakeAMProxy(_am); }
     bool ready() const override { return true; }
     void fetchFromKeychain() override { }
     void restartOauth() override { }
@@ -521,7 +546,7 @@ public:
     void forgetSensitiveData() override { }
 
 private:
-    OCC::AccessManager *_am;
+    QPointer<FakeAM> _am;
 };
 
 class FakeFolder : public QObject
@@ -603,7 +628,7 @@ private:
 inline const FileInfo *findConflict(FileInfo &dir, const QString &filename)
 {
     QFileInfo info(filename);
-    const FileInfo *parentDir = dir.find(info.path());
+    const FileInfo *parentDir = dir.find(PathComponents(filename).parentDirComponents());
     if (!parentDir)
         return nullptr;
     QString start = info.baseName() + QStringLiteral(" (conflicted copy");

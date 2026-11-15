@@ -7,6 +7,7 @@ from os.path import isfile, join, isdir, exists
 from behave import when as When, then as Then, given as Given
 from sure import ensure
 
+import helpers.FileExplorerHelper as FileExplorer
 from helpers.SetupClientHelper import get_resource_path, get_temp_resource_path
 from helpers.SyncHelper import (
     listen_sync_status_for_item,
@@ -15,7 +16,7 @@ from helpers.Utils import wait_for
 from helpers.ConfigHelper import get_config
 from helpers.FilesHelper import (
     build_conflicted_regex,
-    sanitize_path,
+    normalize_path,
     can_read,
     can_write,
     read_file_content,
@@ -25,18 +26,19 @@ from helpers.FilesHelper import (
     convert_path_separators_for_os,
     get_file_for_upload,
 )
+from helpers.TableParser import table_hashes, validate_table_headers
 
 
 def folder_exists(folder_path, timeout=get_config('min_timeout')):
     return wait_for(
-        lambda: isdir(sanitize_path(folder_path)),
+        lambda: isdir(normalize_path(folder_path)),
         timeout,
     )
 
 
 def file_exists(file_path, timeout=get_config('min_timeout')):
     return wait_for(
-        lambda: isfile(sanitize_path(file_path)),
+        lambda: isfile(normalize_path(file_path)),
         timeout,
     )
 
@@ -133,27 +135,50 @@ def move_resource(username, resource_type, source, destination, is_temp_folder=F
 
 def delete_resource(resource, resource_type):
     listen_sync_status_for_item(resource, resource_type)
-    resource_path = sanitize_path(get_resource_path(resource))
+    resource_path = normalize_path(get_resource_path(resource))
     if resource_type == 'file':
         os.remove(resource_path)
     else:
         shutil.rmtree(resource_path)
 
 
+@Given('user "{username}" has created the following folders inside the sync folder:')
+def step(context, username):
+    validate_table_headers(context.table, ['foldername'])
+    folders = table_hashes(context.table)
+    for folder in folders:
+        create_folder(folder['foldername'], username)
+
+
+@Given('user "{username}" has created the following files inside the sync folder:')
+@When('user "{username}" creates the following files inside the sync folder:')
+@When('user "{username}" updates the content of the following files inside the sync folder:')
+def step(context, username):
+    validate_table_headers(context.table, ['filename', 'content'])
+    files = table_hashes(context.table)
+    for file in files:
+        file_path = get_resource_path(file["filename"], username)
+        file_path = convert_path_separators_for_os(file_path)
+        content = file.get("content", "")
+        write_file_to_sync_path(file_path, content)
+
+
+@Given(
+    'user "{username}" has created a file "{filename}" with the following content inside the sync folder'
+)
 @When(
     'user "{username}" creates a file "{filename}" with the following content inside the sync folder'
+)
+@When(
+    'user "{username}" updates file "{filename}" with the following content inside the sync folder'
 )
 def step(context, username, filename):
     file = get_resource_path(filename, username)
     write_file_to_sync_path(convert_path_separators_for_os(file), context.text)
 
 
-@When('user "{username}" creates a folder "{foldername}" inside the sync folder')
-def step(context, username, foldername):
-    create_folder(foldername, username)
-
-
 @Given('user "{username}" has created a folder "{foldername}" inside the sync folder')
+@When('user "{username}" creates a folder "{foldername}" inside the sync folder')
 def step(context, username, foldername):
     create_folder(foldername, username)
 
@@ -177,6 +202,26 @@ def step(context, resource_type, resource_name):
 @When('the user renames a folder "{source}" to "{destination}"')
 def step(context, source, destination):
     rename_file_folder(source, destination)
+
+
+@Then('the following files should exist on the file system with the content:')
+def step(context):
+    validate_table_headers(context.table, ['filename', 'content'])
+    files = table_hashes(context.table)
+    for file in files:
+        file_path = get_resource_path(file['filename'])
+        with open(file_path, encoding='utf-8') as f:
+            content = f.read()
+        expected_content = file['content']
+        with ensure(
+            'Content mismatch for file "{file_path}"\n'
+            + 'Expected: {expected}\n'
+            + 'Actual: {actual}',
+            file_path=file_path,
+            expected=expected_content,
+            actual=content,
+        ):
+            content.should.equal(expected_content)
 
 
 @Then('the file "{file_path}" should exist on the file system with the following content')
@@ -268,13 +313,6 @@ def step(context, user, resource, content):
 @When('the user deletes the {resource_type:ResourceType} "{resource_name}"')
 def step(context, resource_type, resource_name):
     delete_resource(resource_name, resource_type)
-
-
-@When('user "{username}" creates the following files inside the sync folder:')
-def step(context, username):
-    for row in context.table:
-        file = get_resource_path(row[0], username)
-        write_file_to_sync_path(file, '')
 
 
 @Given('the user has created a folder "{folder_name}" in temp folder')
@@ -429,3 +467,42 @@ def step(context):
 @Given('the user has created a file "{filename}" with size "{filesize}" in the sync folder')
 def step(context, filename, filesize):
     create_file_with_size(filename, filesize)
+
+
+@When(
+    'user "{username}" copies the private link of file "{resource}" from the file explorer context menu'
+)
+@When(
+    'user "{username}" copies the private link of folder "{resource}" from the file explorer context menu'
+)
+def step(context, username, resource):
+    resource_path = get_resource_path(resource, username)
+    FileExplorer.copy_private_link(resource_path)
+
+
+@Then(
+    'the following file explorer context menu items should be available for file "{resource}" of user "{username}"'
+)
+@Then(
+    'the following file explorer context menu items should be available for folder "{resource}" of user "{username}"'
+)
+def step(context, resource, username):
+    resource_path = get_resource_path(resource, username)
+    expected_menus = [row['menu'] for row in table_hashes(context.table)]
+    actual_menus = FileExplorer.get_file_context_menus(resource_path)
+
+    for item in expected_menus:
+        with ensure(f'Menu item "{item}" not found in the actual list: {actual_menus}'):
+            (item in actual_menus).should.be.true
+
+
+@Then('the private link should be copied to the clipboard')
+def step(context):
+    clipboard_content = FileExplorer.get_clipboard_content()
+    base_url = get_config('localBackendUrl').rstrip("/")
+    link_pattern = rf'^{re.escape(base_url)}/f/[0-9A-Fa-f-%\$]+$'
+
+    with ensure(
+        f'Clipboard content "{clipboard_content}" does not match the private link pattern "{link_pattern}"'
+    ):
+        (re.fullmatch(link_pattern, clipboard_content)).should_not.be.none

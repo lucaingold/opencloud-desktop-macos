@@ -19,7 +19,9 @@
 #include "gui/application.h"
 #include "gui/folderman.h"
 #include "gui/networkinformation.h"
+#include "libsync/common/utility.h"
 #include "libsync/theme.h"
+#include "resources/jsontheme.h"
 
 #ifdef Q_OS_MAC
 #include "macOS/fileprovider.h"
@@ -33,6 +35,58 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace OCC {
 
+QIcon getIcon(const SyncResult &result)
+{
+    Resources::JsonTheme::SysTrayIconType iconType;
+    Resources::JsonTheme::SysTrayIconStyle iconStyle;
+
+    switch (result.status()) {
+    case SyncResult::Queued:
+        [[fallthrough]];
+    case SyncResult::SyncRunning:
+        iconType = Resources::JsonTheme::SysTrayIconType::Sync;
+        break;
+    case SyncResult::Paused:
+        iconType = Resources::JsonTheme::SysTrayIconType::Pause;
+        break;
+    case SyncResult::Success:
+        if (!result.hasUnresolvedConflicts()) {
+            iconType = Resources::JsonTheme::SysTrayIconType::Ok;
+            break;
+        }
+        [[fallthrough]];
+    case SyncResult::Problem:
+        [[fallthrough]];
+    case SyncResult::Undefined:
+        // this can happen if no sync connections are configured.
+        iconType = Resources::JsonTheme::SysTrayIconType::Information;
+        break;
+    case SyncResult::Offline:
+        iconType = Resources::JsonTheme::SysTrayIconType::Offline;
+        break;
+    case SyncResult::Error:
+        [[fallthrough]];
+    case SyncResult::SetupError:
+        // FIXME: Use problem once we have an icon.
+        iconType = Resources::JsonTheme::SysTrayIconType::Error;
+        break;
+    default:
+        Q_UNREACHABLE();
+        break;
+    }
+
+#ifdef Q_OS_MAC
+    iconStyle = Resources::JsonTheme::SysTrayIconStyle::Mask;
+#else
+    if (Utility::hasDarkSystray()) {
+        iconStyle = Resources::JsonTheme::SysTrayIconStyle::Dark;
+    } else {
+        iconStyle = Resources::JsonTheme::SysTrayIconStyle::Light;
+    }
+#endif
+
+    return Resources::JsonTheme::instance().sysTrayIcon(iconType, iconStyle);
+};
 
 Systray::Systray(QObject *parent)
     : QSystemTrayIcon(parent)
@@ -61,16 +115,15 @@ Systray::Systray(QObject *parent)
 void Systray::setToolTip(const QString &tip)
 {
 #ifdef Q_OS_WIN
-    QSystemTrayIcon::setToolTip(tr("%1: %2").arg(Theme::instance()->appNameGUI(), tip));
+    QSystemTrayIcon::setToolTip(tr("%1: %2").arg(Resources::JsonTheme::instance().applicationDisplayName(), tip));
 #else
-    QSystemTrayIcon::setToolTip(u"%1\n%2"_s.arg(Theme::instance()->appNameGUI(), tip));
+    QSystemTrayIcon::setToolTip(u"%1\n%2"_s.arg(Resources::JsonTheme::instance().applicationDisplayName(), tip));
 #endif
 }
 
 void Systray::slotComputeOverallSyncStatus()
 {
-    auto getIcon = [](const SyncResult &result) { return Theme::instance()->themeTrayIcon(result); };
-    auto getIconFromStatus = [getIcon](const SyncResult::Status &status) { return getIcon(SyncResult{status}); };
+    auto getIconFromStatus = [](const SyncResult::Status &status) { return getIcon(SyncResult{status}); };
     bool allSignedOut = true;
     bool allPaused = true;
     QVector<AccountStatePtr> problemAccounts;
@@ -164,9 +217,10 @@ void Systray::slotComputeOverallSyncStatus()
 void Systray::computeContextMenu()
 {
     Q_ASSERT(!contextMenu());
-    auto *menu = new QMenu(Theme::instance()->appNameGUI());
+    auto *menu = new QMenu(Resources::JsonTheme::instance().applicationDisplayName());
 
-    menu->addAction(Theme::instance()->applicationIcon(), tr("Show %1").arg(Theme::instance()->appNameGUI()), ocApp(), &Application::showSettings);
+    menu->addAction(Resources::JsonTheme::instance().applicationIcon(), tr("Show %1").arg(Resources::JsonTheme::instance().applicationDisplayName()), ocApp(),
+        &Application::showSettings);
 #ifdef Q_OS_MAC
     if (FolderMan::instance()->useFileProvider()) {
         auto *status = menu->addMenu(tr("On-demand sync"));

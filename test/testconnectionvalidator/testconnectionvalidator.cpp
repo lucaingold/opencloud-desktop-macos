@@ -33,10 +33,6 @@ class TestConnectionValidator : public QObject
     enum class FailStage { Invalid, StatusPhp, Capabilities, UserInfo };
 
 private Q_SLOTS:
-
-
-    void initTestCase() { AbstractNetworkJob::httpTimeout = 50ms; }
-
     void testStatusPhp_data()
     {
         QTest::addColumn<FailStage>("failStage");
@@ -58,6 +54,8 @@ private Q_SLOTS:
         QFETCH(FailStage, failStage);
         QFETCH(TestUtils::Values, values);
         QFETCH(ConnectionValidator::Status, status);
+
+        auto setHttpTimeout = QScopedValueRollback(AbstractNetworkJob::httpTimeout, status == ConnectionValidator::Timeout ? 50ms : 5min);
 
         auto reachedStage = FailStage::Invalid;
         FakeFolder fakeFolder({});
@@ -103,10 +101,11 @@ private Q_SLOTS:
             return nullptr;
         });
 
-        ConnectionValidator val(fakeFolder.account());
-        val.checkServer(ConnectionValidator::ValidationMode::ValidateAuthAndUpdate);
+        // ConnectionValidator calls deleteLater() on itself
+        auto *val = new ConnectionValidator(fakeFolder.account(), &fakeFolder);
+        QSignalSpy spy(val, &ConnectionValidator::connectionResult);
+        val->checkServer(ConnectionValidator::ValidationMode::ValidateAuthAndUpdate);
 
-        QSignalSpy spy(&val, &ConnectionValidator::connectionResult);
         QVERIFY(spy.wait());
         QCOMPARE(spy.first().first().value<ConnectionValidator::Status>(), status);
         QCOMPARE(reachedStage, failStage);

@@ -43,9 +43,9 @@ jobs:
         fail-fast: true
         matrix:
             include:
-            - target: windows-cl-msvc2022-x86_64
-              os: windows-2022
-              clang_tidy: false
+            - target: windows-cl-msvc2026-x86_64
+              os: windows-2025-vs2026
+              run_tools: false
               container:
               signing:
                 # set the yaml anchor signing_enabled to true if the workflow was triggered by
@@ -57,9 +57,15 @@ jobs:
                         || startswith(github.ref,   'refs/tags/')
                       )
                   }}
+            - target: windows-cl-msvc2026-arm64
+              os: windows-11-vs2026-arm
+              run_tools: false
+              container:
+              signing:
+                enabled: *signing_enabled
             - target: macos-clang-arm64
-              os: macos-latest
-              clang_tidy: false
+              os: macos-26
+              run_tools: false
               container:
               signing: &macos_signing
                 enabled: *signing_enabled
@@ -75,14 +81,22 @@ jobs:
                     secret_field: notarization_pw
                     env_name: CRAFT_SECRET_MAC_APP_PASSWORD
             - target: macos-clang-x86_64
-              os: macos-latest
-              clang_tidy: false
+              os: macos-26-intel
+              run_tools: false
               container:
               signing: *macos_signing
             - target: linux-gcc-x86_64
               os: ubuntu-latest
-              clang_tidy: true
-              container: invent-registry.kde.org/sysadmin/ci-images/craft-appimage-alma9:latest
+              run_tools: false
+              container: ghcr.io/opencloud-eu/ci-docker-desktop/appimage:latest
+              signing:
+                enabled: *signing_enabled
+            - target: linux-gcc-arm64
+              os: ubuntu-24.04-arm
+              run_tools: true
+              container: ghcr.io/opencloud-eu/ci-docker-desktop/appimage:latest
+              signing:
+                enabled: *signing_enabled
 
     name: ${{ matrix.target }}
 
@@ -98,7 +112,7 @@ jobs:
       CRAFT_TARGET: ${{ matrix.target }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CRAFT_PACKAGE_SYMBOLS: ${{  github.event_name != 'pull_request' }}
-      SIGN_PACKAGE: ${{ matrix.signing.enabled }}
+      SIGN_PACKAGE: ${{ matrix.signing.enabled && 'true' || 'false' }}
       # set the signing key file path if signing is enabled and the keyfile is provided
       SIGNING_KEY_FILE_PATH: ${{
           matrix.signing.keyfile_file_path && matrix.signing.keyfile_file_name
@@ -110,13 +124,13 @@ jobs:
 
     steps:
     - name: Check out full source code for tooling
-      if: ${{ matrix.target  == 'linux-gcc-x86_64' }}
+      if: ${{ matrix.run_tools }}
       uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
     - name: Check out latest commit
-      if: ${{ matrix.target  != 'linux-gcc-x86_64' }}
+      if: ${{ !matrix.run_tools }}
       uses: actions/checkout@v7
 
     - name: Restore and update cache
@@ -138,14 +152,17 @@ jobs:
 
     - name: Clone CraftMaster
       run: |
-        git clone --depth=1 https://invent.kde.org/kde/craftmaster.git "${home}/craft/CraftMaster/CraftMaster"
+        git clone --depth=1 https://github.com/KDE/craftmaster.git "${home}/craft/CraftMaster/CraftMaster"
 
     - name: Craft setup
+      id: setup
       run: |
         New-Item -Path ~/cache -ItemType Directory -ErrorAction SilentlyContinue
         # disable git's safe.directory
         git config --global --add safe.directory '*'
+        $env:OpenCloudVersion = $(cmake -DMIRALL_ECHO_VERSION=ON -P ${env:GITHUB_WORKSPACE}/VERSION.cmake)
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" --setup
+        Add-Content -Value "OpenCloudVersion=${env:OpenCloudVersion}" -Path "${env:GITHUB_OUTPUT}"
 
     - name: Craft unshelve
       run: |
@@ -174,8 +191,6 @@ jobs:
             & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c dev-utils/nsis
         } elseif($IsLinux) {
             & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c dev-utils/linuxdeploy
-            # ensure we have fuse3-devel installed
-            dnf install -y fuse3-devel file
         } elseif($IsMacOS -and ${env:SIGN_PACKAGE} -ieq "true") {
             brew install packages
         }
@@ -185,7 +200,7 @@ jobs:
           & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --install-deps opencloud/opencloud-desktop
 
     - name: QML format lint
-      if: matrix.target  == 'linux-gcc-x86_64'
+      if: ${{ matrix.run_tools }}
       run: |
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c libs/qt6/qttools
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --run pwsh -c "git ls-files "*.qml" "*.js" "*.mjs" | %{ qmlformat -i `$_}"
@@ -196,7 +211,7 @@ jobs:
         }
 
     - name: clang-format format lint
-      if: matrix.target  == 'linux-gcc-x86_64' && github.event_name == 'pull_request'
+      if: ${{ matrix.run_tools && github.event_name == 'pull_request' }}
       run: |
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c libs/llvm
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --run git clang-format --force  ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
@@ -226,15 +241,14 @@ jobs:
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --no-cache --test opencloud/opencloud-desktop
 
     - name: Clang tidy
-      if: ${{ matrix.clang_tidy }}
+      if: ${{ matrix.run_tools }}
       run: |
-        cargo install clang-tidy-sarif sarif-fmt
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c libs/llvm dev-utils/clazy
         $env:BUILD_DIR = $(& "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --get buildDir -q opencloud/opencloud-desktop)
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --run pwsh "${env:GITHUB_WORKSPACE}/.github/workflows/.run-clang-tidy.ps1"
 
     - name: Upload SARIF file
-      if: ${{ matrix.clang_tidy }}
+      if: ${{ matrix.run_tools }}
       uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: clang-tidy.sarif
@@ -310,10 +324,11 @@ jobs:
         Remove-Item -force "${{ matrix.signing.keyfile_file_path }}\${{ matrix.signing.keyfile_file_name }}"
 
     - name: Package msix
-      if: ${{ startsWith(matrix.os, 'windows-') && github.event_name != 'pull_request' }}
+      if: ${{ startsWith(matrix.os, 'windows-') && matrix.signing.enabled }}
       run: |
         & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --no-cache --package --options "[Packager]PackageType=AppxPackager" --options "[Packager]Destination=${{ github.workspace }}/msix/" opencloud/opencloud-desktop
-        Move-Item -Path "${{ github.workspace }}/msix/*.msix" -Destination "${{ github.workspace }}/msix/OpenCloud_Desktop-${{ github.run_number }}.msix" -Force
+        $arch = $env:CRAFT_TARGET.Split('-')[-1]
+        Move-Item -Path "${{ github.workspace }}/msix/*.msix" -Destination "${{ github.workspace }}/msix/OpenCloud_Desktop-${{ github.run_number }}-${arch}.msix" -Force
 
     - name: Upload binary artifacts
       uses: actions/upload-artifact@v7
@@ -322,24 +337,26 @@ jobs:
         path: ${{ github.workspace }}/binaries/*
 
     - name: Upload store msix
-      if: ${{ startsWith(matrix.os, 'windows-') && github.event_name != 'pull_request' }}
+      if: ${{ startsWith(matrix.os, 'windows-') && matrix.signing.enabled }}
       uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.target }}-store-msix-${{ github.run_number }}
         path: ${{ github.workspace }}/msix/*.msixupload
         archive: false
+        retention-days: 1
 
     - name: Upload unsigned msix
       id: upload-unsigned-artifact
-      if: ${{ startsWith(matrix.os, 'windows-') && github.event_name != 'pull_request' }}
+      if: ${{ startsWith(matrix.os, 'windows-') && matrix.signing.enabled }}
       uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.target }}-msix-unsigned-temp-${{ github.run_number }}
         path: ${{ github.workspace }}/msix/*.msix
+        retention-days: 1
 
     - name: submit msix for signing
       id: submit-signing-request
-      uses: signpath/github-action-submit-signing-request@v2
+      uses: signpath/github-action-submit-signing-request@v3
       if: ${{ matrix.signing.enabled && steps.upload-unsigned-artifact.conclusion == 'success' }}
       with:
         api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -360,4 +377,90 @@ jobs:
       with:
         name: ${{ matrix.target }}-msix-${{ github.run_number }}
         path: ${{ github.workspace }}/msix/*.msix
+        archive: false
+
+    - name: Upload cache
+      if: ${{ matrix.signing.enabled}}
+      run: |
+        $cacheFiles = Get-ChildItem "${home}/craft/cache/" -File -Recurse -ErrorAction SilentlyContinue
+        if ($cacheFiles) {
+          # TODO: cache release builds...
+          & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c s3cmd
+          & "${env:GITHUB_WORKSPACE}/.github/workflows/.craft.ps1" -c --run s3cmd --host "${{ vars.S3_CACHE_URL }}" --host-bucket "${{ vars.S3_CACHE_URL }}" --access_key "${{ secrets.S3_CACHE_ACCESS }}" --secret_key "${{ secrets.S3_CACHE_SECRET }}" put --recursive "${home}/craft/cache/" s3://public/desktop/craft-cache/${{ steps.setup.outputs.OpenCloudVersion }}/
+        } else {
+          Write-Host "No cache files to upload, skipping."
+        }
+
+# ------------------------------------------------------------------------------------------------------------------------------------------
+  msix-bundle:
+    needs: build
+    if: *signing_enabled
+    runs-on: windows-2025-vs2026
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+    - name: Download store msix
+      uses: actions/download-artifact@v8
+      with:
+        pattern: '*.msixupload'
+        path: ${{ runner.temp }}/msixupload
+        merge-multiple: true
+
+    - name: Install 7-Zip
+      env:
+        SEVENZIP_VERSION: '26.05'
+        SEVENZIP_SHA256: 15b5682dcf971b7a317f5c98893dc66be8f203d1558618feff64b2e09504150d
+      run: |
+        $zip = "${{ runner.temp }}/7zip.zip"
+        $dir = "${{ runner.temp }}/7zip"
+        Invoke-WebRequest "https://github.com/TheOneRing/7zipzip/releases/download/${env:SEVENZIP_VERSION}/7zip-extra-${env:SEVENZIP_VERSION}-x86_64.zip" -OutFile $zip
+        $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+        if ($hash -ne $env:SEVENZIP_SHA256) {
+          throw "7-Zip checksum mismatch: $hash"
+        }
+        Expand-Archive $zip -DestinationPath $dir -Force
+        Add-Content $env:GITHUB_PATH $dir
+
+    - name: Create msixbundle upload
+      run: |
+        $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/makeappx.exe" |
+          Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+        if (-not $makeappx) {
+          throw "makeappx.exe not found"
+        }
+
+        $packages = "${{ runner.temp }}/packages"
+        $upload = "${{ runner.temp }}/upload"
+        $destination = "${{ github.workspace }}/msixbundle"
+        New-Item -ItemType Directory $packages, $upload, $destination | Out-Null
+
+        $uploads = Get-ChildItem "${{ runner.temp }}/msixupload/*.msixupload"
+        if ($uploads.Count -ne 2) {
+          throw "Expected 2 msixupload files, found $($uploads.Count): $($uploads.Name -join ', ')"
+        }
+        foreach ($file in $uploads) {
+          7za x $file.FullName "-o$packages" -y
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract $($file.Name)" }
+        }
+        Move-Item "$packages/*.appxsym" $upload
+        $msix = Get-ChildItem "$packages/*.msix"
+        if ($msix.Count -ne 2) {
+          throw "Expected 2 msix packages, found $($msix.Count): $($msix.Name -join ', ')"
+        }
+
+        $bundleName = "OpenCloud_Desktop-${{ github.run_number }}.msixbundle"
+        & $makeappx.FullName bundle /o /d $packages /p "$upload/$bundleName"
+        if ($LASTEXITCODE -ne 0) { throw "makeappx bundle failed" }
+
+        $msixUpload = "$destination/OpenCloud_Desktop-${{ github.run_number }}.msixupload"
+        7za a -tzip $msixUpload "$upload/*"
+        if ($LASTEXITCODE -ne 0) { throw "Failed to create msixupload" }
+        7za l $msixUpload
+
+    - name: Upload store msixbundle
+      uses: actions/upload-artifact@v7
+      with:
+        path: ${{ github.workspace }}/msixbundle/*.msixupload
         archive: false
