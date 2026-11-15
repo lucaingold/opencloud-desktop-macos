@@ -29,6 +29,7 @@
 #include <QTimer>
 #include <QUuid>
 
+#import <AppKit/AppKit.h>
 #import <FileProvider/FileProvider.h>
 #import <Foundation/Foundation.h>
 
@@ -36,6 +37,25 @@ namespace OCC {
 namespace Mac {
 
 Q_LOGGING_CATEGORY(lcFileProviderDomainManager, "gui.fileprovider.domainmanager", QtInfoMsg)
+
+namespace {
+// Removing a domain in the default mode deletes its local copies, including edits
+// that were never uploaded. Keep those and show where macOS preserved them.
+void removeDomainPreservingUserData(NSFileProviderDomain *domain, void (^completion)(NSError *error))
+{
+    [NSFileProviderManager removeDomain:domain
+                                   mode:NSFileProviderDomainRemovalModePreserveDirtyUserData
+                      completionHandler:^(NSURL *preservedLocation, NSError *error) {
+                          if (preservedLocation) {
+                              qCInfo(lcFileProviderDomainManager) << "Unsynced files of a removed domain were preserved at" << QString::fromNSString(preservedLocation.path);
+                              dispatch_async(dispatch_get_main_queue(), ^{
+                                  [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[preservedLocation]];
+                              });
+                          }
+                          completion(error);
+                      }];
+}
+}
 
 // Helper to get domain identifier from account (uses account UUID)
 static QString domainIdentifierFromAccount(const Account *account)
@@ -225,27 +245,26 @@ public:
         }
 
         const QPointer<FileProviderDomainManager> guard(owner);
-        [NSFileProviderManager removeDomain:domain
-                          completionHandler:^(NSError *error) {
-                              dispatch_async(dispatch_get_main_queue(), ^{
-                                  if (!guard) {
-                                      return;
-                                  }
-                                  if (error) {
-                                      qCWarning(lcFileProviderDomainManager)
-                                          << "Error removing domain:" << domainId << QString::fromNSString(error.localizedDescription);
-                                      Q_EMIT guard->nativeError(domainId, QString::fromNSString(error.localizedDescription));
-                                      guard->d->disconnectDomain(domainId, FileProviderDomainManager::tr("This account has been removed."));
-                                  } else {
-                                      guard->d->_registeredDomains.remove(domainId);
-                                      guard->d->_connectedDomains.remove(domainId);
-                                      guard->d->_reconnectingDomains.remove(domainId);
-                                      rememberFileProviderDomains(guard->d->_registeredDomains.keys());
-                                      Q_EMIT guard->nativeError(domainId, {});
-                                      Q_EMIT guard->domainRemoved(domainId);
-                                  }
-                              });
-                          }];
+        removeDomainPreservingUserData(domain, ^(NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!guard) {
+                    return;
+                }
+                if (error) {
+                    qCWarning(lcFileProviderDomainManager)
+                        << "Error removing domain:" << domainId << QString::fromNSString(error.localizedDescription);
+                    Q_EMIT guard->nativeError(domainId, QString::fromNSString(error.localizedDescription));
+                    guard->d->disconnectDomain(domainId, FileProviderDomainManager::tr("This account has been removed."));
+                } else {
+                    guard->d->_registeredDomains.remove(domainId);
+                    guard->d->_connectedDomains.remove(domainId);
+                    guard->d->_reconnectingDomains.remove(domainId);
+                    rememberFileProviderDomains(guard->d->_registeredDomains.keys());
+                    Q_EMIT guard->nativeError(domainId, {});
+                    Q_EMIT guard->domainRemoved(domainId);
+                }
+            });
+                          });
     }
 
     void disconnectDomain(const AccountState *accountState, const QString &reason)
@@ -606,13 +625,12 @@ Result<void, QString> FileProviderDomainManager::removeAllDomains()
                 continue;
             }
             dispatch_group_enter(group);
-            [NSFileProviderManager removeDomain:domain
-                              completionHandler:^(NSError *removeError) {
-                                  if (removeError) {
-                                      promise->addResult(QString::fromNSString(removeError.localizedDescription));
-                                  }
-                                  dispatch_group_leave(group);
-                              }];
+            removeDomainPreservingUserData(domain, ^(NSError *removeError) {
+                if (removeError) {
+                    promise->addResult(QString::fromNSString(removeError.localizedDescription));
+                }
+                dispatch_group_leave(group);
+            });
         }
         dispatch_group_notify(group, dispatch_get_main_queue(), ^{ promise->finish(); });
     }];
