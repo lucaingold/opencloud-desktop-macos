@@ -21,8 +21,6 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 Guidance for Claude Code working in this repository.
 
-### use sonet for explore sub-agent
-
 ## Project Overview
 
 OpenCloud Desktop is a Qt-based C++ desktop synchronization client for OpenCloud (Windows, macOS, Linux).
@@ -68,66 +66,3 @@ Load relevant docs before working on specific areas:
 - **macOS Finder behavior and limits**: ai_docs/macos-finder-features.md
 - **Current validation**: ai_docs/testing.md
 - **Changelog**: CHANGELOG.md
-
-## Session History (agent-watch)
-
-Use `agent-watch` to review previous session context when the user asks you to learn from past work or when you need to understand what was done before.
-
-```bash
-# List sessions for this project (non-interactive)
-agent-watch list-sessions -p opencloud
-
-# View a specific session by ID (formatted, non-interactive)
-agent-watch sessions <session_id>
-
-# List recent sub-agents
-agent-watch list 20
-```
-
-**When to use:**
-- User says "learn from previous session" or "check what was done before"
-- You need context on a bug fix or decision from a prior session
-- Backloading mulch records from past work
-
-**Important:** `agent-watch sessions` (no ID) is interactive — do NOT run it in Bash. Always pass a session ID or use `list-sessions`.
-
-<!-- mulch:start -->
-## Project Expertise (Mulch)
-
-This project uses [Mulch](https://github.com/jayminwest/mulch) for structured expertise management.
-
-**At the start of every session**, run:
-```bash
-mulch prime
-```
-
-This injects project-specific conventions, patterns, decisions, and other learnings into your context.
-Use `mulch prime --files src/foo.ts` to load only records relevant to specific files.
-
-**Before completing your task**, review your work for insights worth preserving — conventions discovered,
-patterns applied, failures encountered, or decisions made — and record them:
-```bash
-mulch record <domain> --type <convention|pattern|failure|decision|reference|guide> --description "..."
-```
-
-Link evidence when available: `--evidence-commit <sha>`, `--evidence-bead <id>`
-
-Run `mulch status` to check domain health and entry counts.
-Run `mulch --help` for full usage.
-Mulch write commands use file locking and atomic writes — multiple agents can safely record to the same domain concurrently.
-
-### Before You Finish
-
-1. Discover what to record:
-   ```bash
-   mulch learn
-   ```
-2. Store insights from this work session:
-   ```bash
-   mulch record <domain> --type <convention|pattern|failure|decision|reference|guide> --description "..."
-   ```
-3. Validate and commit:
-   ```bash
-   mulch sync
-   ```
-<!-- mulch:end -->
