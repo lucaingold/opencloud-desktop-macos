@@ -534,5 +534,11 @@ QIcon JsonTheme::sysTrayIcon(const SysTrayIconType type, const SysTrayIconStyle 
     QString fileName = sysTrayTypeToString(type);
     QString themeName = sysTrayStyleToString(style);
 
-    return Resources::loadIcon(themeName, fileName);
+    ret = Resources::loadIcon(themeName, fileName);
+    // macOS only adapts template images to the menu bar's appearance (8c83557d0 dropped this
+    // for the built-in icons, which then stayed black on dark menu bars).
+    if (style == SysTrayIconStyle::Mask) {
+        ret.setIsMask(true);
+    }
+    return ret;
 }
