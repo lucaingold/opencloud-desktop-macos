@@ -1,0 +1,12 @@
+/* Finder context menu actions (NSExtensionFileProviderActionName in Info.plist). macOS looks these up in Localizable.strings by their English name. */
+"Open in browser" = "Im Browser öffnen";
+"Share…" = "Teilen…";
+"Show file versions in browser" = "Dateiversionen im Browser anzeigen";
+"Copy private link" = "Privaten Link kopieren";
+
+/* Sync problems reported to the desktop client's status menu (FileProviderSyncStatus.safeDescription). */
+"Sign in to resume syncing." = "Melden Sie sich an, um die Synchronisation fortzusetzen.";
+"The server is unreachable." = "Der Server ist nicht erreichbar.";
+"The server has insufficient storage." = "Auf dem Server ist nicht genügend Speicherplatz frei.";
+"Some items could not be synced." = "Einige Objekte konnten nicht synchronisiert werden.";
+"Permission is required to sync some items." = "Für die Synchronisation einiger Objekte fehlt die Berechtigung.";

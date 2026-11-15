@@ -349,6 +349,12 @@ QString setupTranslations(QApplication *app)
                 qCCritical(lcMain) << u"Failed to install translator";
                 translator->deleteLater();
             }
+#ifdef Q_OS_MAC
+            // Strings of the on-demand files additions live in translations/macos_<lang>.ts.
+            if (auto *macTranslator = new QTranslator(app); !macTranslator->load(QStringLiteral("macos_") + lang, trPath) || !qApp->installTranslator(macTranslator)) {
+                macTranslator->deleteLater();
+            }
+#endif
             if (!qtTranslator->isEmpty() && !qApp->installTranslator(qtTranslator)) {
                 qCCritical(lcMain) << u"Failed to install Qt translator";
                 qtTranslator->deleteLater();

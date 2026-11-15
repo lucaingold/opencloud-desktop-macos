@@ -33,6 +33,9 @@ generate_export_header(OpenCloudResources
 
 # Handle Translations, pick all desktop_*.ts files from translations directory.
 file(GLOB desktop_translations ${CMAKE_SOURCE_DIR}/translations/desktop_*.ts)
+# Strings of the macOS on-demand files additions, kept apart from the Transifex-managed files.
+file(GLOB macos_translations ${CMAKE_SOURCE_DIR}/translations/macos_*.ts)
+list(APPEND desktop_translations ${macos_translations})
 qt_add_lrelease(OpenCloudResources TS_FILES ${desktop_translations} QM_FILES_OUTPUT_VARIABLE desktop_compiled_translations)
 add_resources_to_target(
     TARGET OpenCloudResources

@@ -300,16 +300,16 @@ final class FileProviderSyncStatus {
         // Never send server response bodies, URLs or filenames over the status channel.
         if error.domain == NSFileProviderErrorDomain {
             switch error.code {
-            case NSFileProviderError.notAuthenticated.rawValue: return "Sign in to resume syncing."
-            case NSFileProviderError.serverUnreachable.rawValue: return "The server is unreachable."
-            case NSFileProviderError.insufficientQuota.rawValue: return "The server has insufficient storage."
-            default: return "Some items could not be synced."
+            case NSFileProviderError.notAuthenticated.rawValue: return NSLocalizedString("Sign in to resume syncing.", comment: "Sync problem shown in the desktop client's status menu")
+            case NSFileProviderError.serverUnreachable.rawValue: return NSLocalizedString("The server is unreachable.", comment: "Sync problem shown in the desktop client's status menu")
+            case NSFileProviderError.insufficientQuota.rawValue: return NSLocalizedString("The server has insufficient storage.", comment: "Sync problem shown in the desktop client's status menu")
+            default: return NSLocalizedString("Some items could not be synced.", comment: "Sync problem shown in the desktop client's status menu")
             }
         }
         if error.domain == NSCocoaErrorDomain && [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(error.code) {
-            return "Permission is required to sync some items."
+            return NSLocalizedString("Permission is required to sync some items.", comment: "Sync problem shown in the desktop client's status menu")
         }
-        return "Some items could not be synced."
+        return NSLocalizedString("Some items could not be synced.", comment: "Sync problem shown in the desktop client's status menu")
     }
 
     private final class PendingObserver: NSObject, NSFileProviderEnumerationObserver {
