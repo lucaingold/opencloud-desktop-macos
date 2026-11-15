@@ -272,6 +272,18 @@ import UniformTypeIdentifiers
         return CFPreferencesCopyMultiple(nil, suite, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? [String: Any] ?? [:]
     }
 
+    private static let exclusionsLock = NSLock()
+    private static var exclusionsCache = SyncExclusions(lines: [])
+
+    /// The desktop client's ignore list, shared through the app group by the host app.
+    var syncExclusions: SyncExclusions {
+        let lines = (try? persistedCredentialState())?[SyncExclusions.appGroupKey] as? [String] ?? []
+        return Self.exclusionsLock.withLock {
+            if Self.exclusionsCache.lines != lines { Self.exclusionsCache = SyncExclusions(lines: lines) }
+            return Self.exclusionsCache
+        }
+    }
+
     private func credentialGenerationIsCurrent(_ generation: String) -> Bool {
         guard let values = try? persistedCredentialState() else { return false }
         return values[generationKey] as? String == generation && values[removalKey] as? Bool != true
@@ -593,6 +605,13 @@ import UniformTypeIdentifiers
                 let remotePath = parentPath.hasSuffix("/")
                     ? parentPath + itemTemplate.filename
                     : parentPath + "/" + itemTemplate.filename
+
+                // Like the sync engine, never upload items on the ignore list (.DS_Store,
+                // Office lock files, partial downloads...). macOS keeps them local only.
+                if self.syncExclusions.isExcluded(path: remotePath, isDirectory: isDirectory) {
+                    logger.debug("Keeping excluded item local")
+                    throw NSFileProviderError(.excludedFromSync)
+                }
 
                 var createdItem: WebDAVItem?
 

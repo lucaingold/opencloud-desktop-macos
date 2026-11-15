@@ -33,6 +33,8 @@
 #include "libsync/creds/httpcredentials.h"
 #include "libsync/graphapi/spacesmanager.h"
 #include "libsync/graphapi/space.h"
+#include "libsync/configfile.h"
+#include <QFile>
 
 #import <Foundation/Foundation.h>
 #import <FileProvider/FileProvider.h>
@@ -56,6 +58,27 @@ static NSString *credentialSuiteIdentifier(const QString &appGroupIdentifier)
                     .toNSString();
     }
     return suite;
+}
+
+// The sync engine's ignore list (system and user scope), shared with the extension so
+// it keeps matching items local instead of uploading them.
+static NSArray<NSString *> *syncExcludePatterns()
+{
+    NSMutableArray<NSString *> *patterns = [NSMutableArray array];
+    const OCC::ConfigFile cfg;
+    for (const auto &path : {cfg.excludeFile(OCC::ConfigFile::SystemScope), cfg.excludeFile(OCC::ConfigFile::UserScope)}) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+        while (!file.atEnd()) {
+            const auto line = QString::fromUtf8(file.readLine()).trimmed();
+            if (!line.isEmpty() && !line.startsWith(QLatin1Char('#'))) {
+                [patterns addObject:line.toNSString()];
+            }
+        }
+    }
+    return patterns;
 }
 
 static bool persistCredentialState(const QString &appGroupIdentifier, NSDictionary<NSString *, id> *values)
@@ -373,7 +396,9 @@ void FileProviderXPC::authenticateFileProviderDomain(QString domainIdentifier)
     NSObject<ClientCommunicationProtocol> *service = (__bridge NSObject<ClientCommunicationProtocol> *)servicePtr;
 
     NSString *generation = QUuid::createUuid().toString(QUuid::WithoutBraces).toNSString();
-    if (!persistCredentialState(_appGroupIdentifier, @{[@"fp_config_generation_" stringByAppendingString:domainIdentifier.toNSString()] : generation})) {
+    if (!persistCredentialState(_appGroupIdentifier, @{
+            [@"fp_config_generation_" stringByAppendingString:domainIdentifier.toNSString()] : generation,
+            @"fp_exclude_patterns" : syncExcludePatterns()})) {
         qCWarning(lcFileProviderXPC) << "Could not persist the credential generation for domain:" << domainIdentifier;
         Q_EMIT domainStatusChanged(domainIdentifier, tr("Could not persist the on-demand credential generation."));
         return;

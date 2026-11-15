@@ -1,0 +1,31 @@
+import Foundation
+
+@main struct ExclusionTests {
+    static func check(_ condition: Bool, _ message: String) { precondition(condition, message) }
+
+    static func main() throws {
+        let listURL = URL(fileURLWithPath: CommandLine.arguments[1])
+        let lines = try String(contentsOf: listURL, encoding: .utf8).components(separatedBy: "\n")
+        let system = SyncExclusions(lines: lines)
+        check(!system.isEmpty, "the system ignore list loads")
+        for path in ["/.DS_Store", "/Projects/.DS_Store", "/Docs/~$report.docx", "/Docs/.~lock.report.odt#",
+                     "/Downloads/video.mp4.part", "/a/b.crdownload", "/notes.txt~", "/Icon\r", "/x/._resource"] {
+            check(system.isExcluded(path: path, isDirectory: false), "\(path.debugDescription) is excluded")
+        }
+        check(system.isExcluded(path: "/.Trashes/file.txt", isDirectory: false), "items inside an excluded folder are excluded")
+        for path in ["/report.docx", "/Projects/main.swift", "/Photos/IMG_0001.HEIC", "/Docs/lock.txt", "/Icon.png"] {
+            check(!system.isExcluded(path: path, isDirectory: false), "\(path) is synced")
+        }
+
+        let user = SyncExclusions(lines: ["# comment", "", "build/", "/Projects/secret/*.key", "]*.log"])
+        check(user.isExcluded(path: "/app/build", isDirectory: true), "trailing slash excludes directories")
+        check(!user.isExcluded(path: "/app/build", isDirectory: false), "trailing slash does not exclude files")
+        check(user.isExcluded(path: "/app/build/out.o", isDirectory: false), "items below an excluded directory are excluded")
+        check(user.isExcluded(path: "/Projects/secret/api.key", isDirectory: false), "path patterns match from the space root")
+        check(!user.isExcluded(path: "/Projects/secret/sub/api.key", isDirectory: false), "* in a path pattern does not cross folders")
+        check(!user.isExcluded(path: "/Other/Projects/secret/api.key", isDirectory: false), "path patterns are anchored at the root")
+        check(user.isExcluded(path: "/var/server.log", isDirectory: false), "a leading ] still excludes")
+        check(SyncExclusions(lines: []).isExcluded(path: "/.DS_Store", isDirectory: false) == false, "an empty list excludes nothing")
+        print("FileProvider exclusion tests passed")
+    }
+}

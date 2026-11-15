@@ -115,8 +115,10 @@ final class FileProviderSyncStatus {
         if let error = error as NSError? {
             // Cancellation and expired cursors are normal control flow, not sync failures.
             let cancelled = Self.isCancellation(error)
+            // Items on the ignore list are kept local on purpose.
             let expired = error.domain == NSFileProviderErrorDomain
-                && [NSFileProviderError.Code.syncAnchorExpired.rawValue, NSFileProviderError.Code.pageExpired.rawValue].contains(error.code)
+                && [NSFileProviderError.Code.syncAnchorExpired.rawValue, NSFileProviderError.Code.pageExpired.rawValue,
+                    NSFileProviderError.Code.excludedFromSync.rawValue].contains(error.code)
             if !cancelled && !expired { errors[operation.key] = error }
         } else {
             errors.removeValue(forKey: operation.key)
