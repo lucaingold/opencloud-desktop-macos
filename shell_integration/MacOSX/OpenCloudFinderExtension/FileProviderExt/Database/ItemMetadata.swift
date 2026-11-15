@@ -212,3 +212,10 @@ struct TrashMetadata: Codable, Sendable, Equatable {
     let originalParentOcId: String
     let deletionDate: Date?
 }
+
+/// Persists TUS upload URLs, so an upload resumes even after the extension was relaunched.
+protocol TusResumeStore: Sendable {
+    func tusLocation(fingerprint: String) async -> URL?
+    func saveTusLocation(_ location: URL, fingerprint: String) async
+    func removeTusLocation(fingerprint: String) async
+}

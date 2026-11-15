@@ -657,7 +657,8 @@ import UniformTypeIdentifiers
                         do {
                             createdItem = try await webdav.uploadFile(from: url ?? emptyURL, to: remotePath,
                                                                       ifNoneMatch: true, progress: progress,
-                                                                      modificationDate: fields.contains(.contentModificationDate) ? itemTemplate.contentModificationDate ?? nil : nil)
+                                                                      modificationDate: fields.contains(.contentModificationDate) ? itemTemplate.contentModificationDate ?? nil : nil,
+                                                                      resumeStore: database)
                         } catch WebDAVError.conflict {
                             if let existing = try await webdav.listDirectory(path: remotePath).first {
                                 let metadata = try await database.mergeServerMetadata(ItemMetadata(from: existing, parentOcId: parentOcId))
@@ -786,7 +787,8 @@ import UniformTypeIdentifiers
                             guard let etag = String(data: baseVersion.contentVersion, encoding: .utf8),
                                   !etag.isEmpty, !etag.hasPrefix("stable-") else { throw WebDAVError.conflict }
                             if let updatedItem = try await webdav.uploadFile(from: newContents, to: metadata.remotePath, ifMatchEtag: etag, progress: progress,
-                                                                           modificationDate: changedFields.contains(.contentModificationDate) ? item.contentModificationDate ?? nil : nil) {
+                                                                           modificationDate: changedFields.contains(.contentModificationDate) ? item.contentModificationDate ?? nil : nil,
+                                                                           resumeStore: database) {
                                 metadata = try await database.mergeServerMetadata(ItemMetadata(from: updatedItem, parentOcId: metadata.parentOcId), preservingIdentifier: metadata.ocId)
                             }
                         } catch WebDAVError.conflict {
@@ -806,7 +808,8 @@ import UniformTypeIdentifiers
                             }
                             let copy = try await webdav.uploadConflictCopy(from: newContents, directory: copyParent,
                                                                          filename: item.filename, progress: progress,
-                                                                         modificationDate: changedFields.contains(.contentModificationDate) ? item.contentModificationDate ?? nil : nil)
+                                                                         modificationDate: changedFields.contains(.contentModificationDate) ? item.contentModificationDate ?? nil : nil,
+                                                                         resumeStore: database)
                             var copyMetadata = try await database.mergeServerMetadata(ItemMetadata(from: copy, parentOcId: copyParentId))
                             copyMetadata.isDownloaded = true
                             copyMetadata.isUploaded = true

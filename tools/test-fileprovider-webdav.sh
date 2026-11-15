@@ -9,3 +9,9 @@ xcrun swiftc -o "$build_dir/tests" \
     "$sources/../Database/ItemMetadata.swift" "$sources/../FileProviderItem.swift" \
     "$root/test/macos/test_fileprovider_webdav.swift"
 "$build_dir/tests"
+
+xcrun swiftc -o "$build_dir/tus-tests" \
+    "$sources/TransferProgressDelegate.swift" "$sources/WebDAVItem.swift" "$sources/WebDAVXMLParser.swift" "$sources/WebDAVClient.swift" \
+    "$sources/../Database/ItemMetadata.swift" "$sources/../FileProviderItem.swift" \
+    "$root/test/macos/test_fileprovider_tus.swift"
+"$build_dir/tus-tests"

@@ -38,6 +38,11 @@ actor WebDAVClient {
     
     /// URL session for network requests
     let session: URLSession
+
+    /// Server TUS capability: nil until loaded, .some(nil) when the server lacks TUS.
+    private var tusCapability: TusCapability??
+    /// Upload URLs by file fingerprint, so a retried upload resumes instead of restarting.
+    private var tusUploads: [String: URL] = [:]
     
     /// User agent string
     private let userAgent = "OpenCloud-macOS/FileProviderExt"
@@ -90,8 +95,10 @@ actor WebDAVClient {
 
         // Configure URL session
         let config = sessionConfiguration ?? URLSessionConfiguration.default
+        // timeoutIntervalForRequest is an idle timeout: a stalled transfer fails after
+        // 60 s without data. Do not cap total duration, or large files can never finish.
         config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForResource = 7 * 24 * 60 * 60
         self.session = URLSession(configuration: config)
     }
 
@@ -328,11 +335,237 @@ actor WebDAVClient {
     
     /// Upload a file from a local URL
     /// - Parameter ifMatchEtag: If set, sends If-Match header for conflict detection (412 on mismatch)
-    func uploadFile(from localURL: URL, to remotePath: String, ifMatchEtag: String? = nil, ifNoneMatch: Bool = false, progress: Progress? = nil, modificationDate: Date? = nil) async throws -> WebDAVItem? {
-        try await withRetry {
-            try await self.performUploadFile(from: localURL, to: remotePath, ifMatchEtag: ifMatchEtag, ifNoneMatch: ifNoneMatch, progress: progress, modificationDate: modificationDate)
+    func uploadFile(from localURL: URL, to remotePath: String, ifMatchEtag: String? = nil, ifNoneMatch: Bool = false, progress: Progress? = nil, modificationDate: Date? = nil,
+                    resumeStore: TusResumeStore? = nil) async throws -> WebDAVItem? {
+        let size = Int64((try localURL.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+        if size >= Self.tusThreshold, let tus = await tusSupport() {
+            try await performTusUpload(from: localURL, size: size, to: remotePath, tus: tus, ifMatchEtag: ifMatchEtag,
+                                       ifNoneMatch: ifNoneMatch, progress: progress, modificationDate: modificationDate, resumeStore: resumeStore)
+        } else {
+            try await withRetry {
+                try await self.performUploadFile(from: localURL, to: remotePath, ifMatchEtag: ifMatchEtag, ifNoneMatch: ifNoneMatch, progress: progress, modificationDate: modificationDate)
+            }
         }
         return try await listDirectory(path: remotePath).first
+    }
+
+    // MARK: - Resumable uploads (TUS), mirroring the sync engine's PropagateUploadFileTUS
+
+    struct TusCapability {
+        let extensions: Set<String>
+        let maxChunkSize: Int64
+        let methodOverride: Bool
+        let checksumType: String
+    }
+
+    /// Files from this size use TUS; smaller ones gain nothing from resuming.
+    static let tusThreshold: Int64 = 10 * 1024 * 1024
+    /// Bytes per PATCH, held in memory while sent. Small enough to keep concurrent
+    /// uploads lean; a lost connection costs at most one chunk.
+    static let tusChunkSize: Int64 = 8 * 1024 * 1024
+    private static let tusMaxStalledAttempts = 5
+
+    func tusSupport() async -> TusCapability? {
+        if let known = tusCapability { return known }
+        var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false)
+        components?.path = "/ocs/v1.php/cloud/capabilities"
+        components?.queryItems = [URLQueryItem(name: "format", value: "json")]
+        guard let url = components?.url else { return nil }
+        var request = authenticatedRequest(url: url, method: "GET")
+        request.setValue("true", forHTTPHeaderField: "OCS-APIRequest")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // A failed lookup is not cached: the next large upload asks again.
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let capabilities = ((root["ocs"] as? [String: Any])?["data"] as? [String: Any])?["capabilities"] as? [String: Any] else {
+            logger.warning("Could not load server capabilities; using single-request uploads")
+            return nil
+        }
+        let files = capabilities["files"] as? [String: Any]
+        let tus = files?["tus_support"] as? [String: Any]
+        let checksums = capabilities["checksums"] as? [String: Any]
+        let extensions = Set(((tus?["extension"] as? String) ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+        let capability: TusCapability?
+        if let version = tus?["version"] as? String, !version.isEmpty, extensions.contains("creation") {
+            capability = TusCapability(extensions: extensions,
+                                       maxChunkSize: (tus?["max_chunk_size"] as? NSNumber)?.int64Value ?? 0,
+                                       methodOverride: !((tus?["http_method_override"] as? String) ?? "").isEmpty,
+                                       checksumType: ((checksums?["preferredUploadType"] as? String) ?? "SHA1").uppercased())
+        } else {
+            capability = nil
+        }
+        tusCapability = .some(capability)
+        return capability
+    }
+
+    private static func checksum(of url: URL, type: String) throws -> (type: String, value: String) {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        func digest<H: HashFunction>(_ hasher: inout H) throws -> String {
+            while let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty { hasher.update(data: chunk) }
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+        switch type {
+        case "SHA256": var h = SHA256(); return ("SHA256", try digest(&h))
+        case "MD5": var h = Insecure.MD5(); return ("MD5", try digest(&h))
+        default: var h = Insecure.SHA1(); return ("SHA1", try digest(&h))
+        }
+    }
+
+    private func tusRequest(url: URL, method: String, tus: TusCapability, ifMatchEtag: String?, ifNoneMatch: Bool, modificationDate: Date?) throws -> URLRequest {
+        var request = authenticatedRequest(url: url, method: method)
+        if method == "PATCH" && tus.methodOverride {
+            request.httpMethod = "POST"
+            request.setValue("PATCH", forHTTPHeaderField: "X-HTTP-Method-Override")
+        }
+        request.setValue("1.0.0", forHTTPHeaderField: "Tus-Resumable")
+        if let date = modificationDate {
+            let timestamp = date.timeIntervalSince1970.rounded(.down)
+            guard timestamp.isFinite, timestamp > Double(Int64.min), timestamp < Double(Int64.max) else { throw CocoaError(.fileWriteUnknown) }
+            request.setValue(String(Int64(timestamp)), forHTTPHeaderField: "X-OC-Mtime")
+        }
+        if let etag = ifMatchEtag { request.setValue(Self.quotedETag(etag), forHTTPHeaderField: "If-Match") }
+        if ifNoneMatch { request.setValue("*", forHTTPHeaderField: "If-None-Match") }
+        return request
+    }
+
+    private static func tusError(_ status: Int) -> WebDAVError {
+        switch status {
+        case 401: return .notAuthenticated
+        case 403: return .permissionDenied
+        case 404: return .fileNotFound
+        case 412: return .conflict
+        case 500...599 where status != 501 && status != 507: return .serverError
+        default: return .httpError(statusCode: status, message: nil)
+        }
+    }
+
+    private func performTusUpload(from localURL: URL, size: Int64, to remotePath: String, tus: TusCapability,
+                                  ifMatchEtag: String?, ifNoneMatch: Bool, progress: Progress?, modificationDate: Date?,
+                                  resumeStore: TusResumeStore?) async throws {
+        guard let base = url(for: "/") else { throw WebDAVError.invalidURL }
+        let checksum = try Self.checksum(of: localURL, type: tus.checksumType)
+        let mtime = modificationDate.map { String(Int64($0.timeIntervalSince1970.rounded(.down))) } ?? ""
+        let fingerprint = [remotePath, String(size), mtime, checksum.value].joined(separator: "\u{0}")
+        let path = "/" + remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let chunkLimit = tus.maxChunkSize > 0 ? min(tus.maxChunkSize, Self.tusChunkSize) : Self.tusChunkSize
+        progress?.kind = .file
+        progress?.fileOperationKind = .uploading
+        progress?.fileTotalCount = 1
+        progress?.totalUnitCount = max(1, size)
+
+        let handle = try FileHandle(forReadingFrom: localURL)
+        defer { try? handle.close() }
+        func forget() async {
+            tusUploads[fingerprint] = nil
+            await resumeStore?.removeTusLocation(fingerprint: fingerprint)
+        }
+        var location = tusUploads[fingerprint]
+        if location == nil, let stored = await resumeStore?.tusLocation(fingerprint: fingerprint),
+           stored.host?.lowercased() == base.host?.lowercased() {
+            location = stored
+        }
+        var offset: Int64 = -1   // unknown: ask the server before sending
+        var stalled = 0
+        while offset < size {
+            try Task.checkCancellation()
+            do {
+                if let current = location, offset < 0 {
+                    let request = try tusRequest(url: current, method: "HEAD", tus: tus, ifMatchEtag: nil, ifNoneMatch: false, modificationDate: nil)
+                    let (_, response) = try await session.data(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw WebDAVError.networkError(URLError(.badServerResponse)) }
+                    if [403, 404, 410].contains(http.statusCode) {
+                        // The server discarded the partial upload: start a new one.
+                        await forget()
+                        location = nil
+                        offset = 0
+                        continue
+                    }
+                    guard http.statusCode == 200 || http.statusCode == 204,
+                          let value = http.value(forHTTPHeaderField: "Upload-Offset").flatMap(Int64.init), value <= size else {
+                        throw Self.tusError(http.statusCode)
+                    }
+                    offset = value
+                    progress?.completedUnitCount = offset
+                    logger.info("Resuming upload at \(offset, privacy: .public) of \(size, privacy: .public) bytes")
+                    continue
+                }
+                if offset < 0 { offset = 0 }
+                try handle.seek(toOffset: UInt64(offset))
+                let chunk = try handle.read(upToCount: Int(min(chunkLimit, size - offset))) ?? Data()
+                guard Int64(chunk.count) == min(chunkLimit, size - offset) else { throw CocoaError(.fileReadUnknown) }
+                var request: URLRequest
+                let creating = location == nil
+                if creating {
+                    request = try tusRequest(url: base, method: "POST", tus: tus, ifMatchEtag: ifMatchEtag, ifNoneMatch: ifNoneMatch, modificationDate: modificationDate)
+                    func meta(_ key: String, _ value: String) -> String { key + " " + Data(value.utf8).base64EncodedString() }
+                    var metadata = [meta("filename", path), meta("checksum", checksum.type + " " + checksum.value)]
+                    if !mtime.isEmpty { metadata.append(meta("mtime", mtime)) }
+                    request.setValue(metadata.joined(separator: ","), forHTTPHeaderField: "Upload-Metadata")
+                    request.setValue(String(size), forHTTPHeaderField: "Upload-Length")
+                } else {
+                    request = try tusRequest(url: location!, method: "PATCH", tus: tus, ifMatchEtag: ifMatchEtag, ifNoneMatch: false, modificationDate: modificationDate)
+                }
+                let sendsData = !creating || tus.extensions.contains("creation-with-upload")
+                if sendsData {
+                    request.setValue("application/offset+octet-stream", forHTTPHeaderField: "Content-Type")
+                    request.setValue(String(offset), forHTTPHeaderField: "Upload-Offset")
+                }
+                let transfer = TransferProgressDelegate(progress: progress, baseOffset: offset, totalSize: size)
+                let (_, response) = try await session.upload(for: request, from: sendsData ? chunk : Data(), delegate: transfer)
+                guard let http = response as? HTTPURLResponse else { throw WebDAVError.networkError(URLError(.badServerResponse)) }
+                switch http.statusCode {
+                case 200, 201, 204:
+                    if creating {
+                        guard let header = http.value(forHTTPHeaderField: "Location"),
+                              let created = URL(string: header, relativeTo: base)?.absoluteURL,
+                              created.host?.lowercased() == base.host?.lowercased() else {
+                            throw WebDAVError.parseError("Upload did not receive a location")
+                        }
+                        location = created
+                        tusUploads[fingerprint] = created
+                        await resumeStore?.saveTusLocation(created, fingerprint: fingerprint)
+                    }
+                    let reported = http.value(forHTTPHeaderField: "Upload-Offset").flatMap(Int64.init)
+                    let next = reported ?? (sendsData ? offset + Int64(chunk.count) : offset)
+                    guard next >= offset, next <= size else { throw WebDAVError.parseError("Invalid upload offset") }
+                    if next > offset {
+                        stalled = 0
+                    } else if sendsData {
+                        stalled += 1
+                        guard stalled <= Self.tusMaxStalledAttempts else { throw WebDAVError.parseError("Upload made no progress") }
+                    }
+                    offset = next
+                    progress?.completedUnitCount = offset
+                case 409 where !creating:
+                    // Offset mismatch on a diverged resume: ask the server where it stands.
+                    stalled += 1
+                    guard stalled <= Self.tusMaxStalledAttempts else { throw WebDAVError.conflict }
+                    offset = -1
+                case 460:
+                    // Checksum mismatch: the server rejected the assembled file.
+                    await forget()
+                    throw WebDAVError.httpError(statusCode: 460, message: "Checksum mismatch")
+                case 409:
+                    throw WebDAVError.conflict
+                default:
+                    throw Self.tusError(http.statusCode)
+                }
+            } catch {
+                guard isTransientError(error), stalled < Self.tusMaxStalledAttempts else {
+                    if !isTransientError(error) && !(error is CancellationError) && (error as? URLError)?.code != .cancelled { await forget() }
+                    throw error
+                }
+                stalled += 1
+                let delay = Self.baseRetryDelay * pow(2.0, Double(stalled - 1))
+                logger.warning("Upload interrupted (attempt \(stalled, privacy: .public)), resuming in \(delay, privacy: .public)s")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                // Ask the server how much arrived instead of resending from the last chunk start.
+                if location != nil { offset = -1 }
+            }
+        }
+        await forget()
     }
 
     private func performUploadFile(from localURL: URL, to remotePath: String, ifMatchEtag: String?, ifNoneMatch: Bool, progress: Progress?, modificationDate: Date?) async throws {
@@ -405,7 +638,8 @@ actor WebDAVClient {
     
     /// Preserve a local edit under a separate name when the original changed
     /// remotely. Every write is create-only; neither remote version is overwritten.
-    func uploadConflictCopy(from localURL: URL, directory: String, filename: String, progress: Progress? = nil, modificationDate: Date? = nil) async throws -> WebDAVItem {
+    func uploadConflictCopy(from localURL: URL, directory: String, filename: String, progress: Progress? = nil, modificationDate: Date? = nil,
+                            resumeStore: TusResumeStore? = nil) async throws -> WebDAVItem {
         guard let contentHash = SHA256.hash(contentsOf: localURL) else { throw CocoaError(.fileReadUnknown) }
         let digest = contentHash.map { String(format: "%02x", $0) }.joined()
         let pathExtension = (filename as NSString).pathExtension
@@ -420,7 +654,8 @@ actor WebDAVClient {
             let copyName = keptStem + marker + keptExtension
             let path = directory.hasSuffix("/") ? directory + copyName : directory + "/" + copyName
             do {
-                guard let item = try await uploadFile(from: localURL, to: path, ifNoneMatch: true, progress: progress, modificationDate: modificationDate) else {
+                guard let item = try await uploadFile(from: localURL, to: path, ifNoneMatch: true, progress: progress, modificationDate: modificationDate,
+                                                      resumeStore: resumeStore) else {
                     throw WebDAVError.parseError("Conflict copy metadata missing")
                 }
                 return item

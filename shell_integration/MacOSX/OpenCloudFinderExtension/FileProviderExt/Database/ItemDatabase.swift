@@ -184,6 +184,11 @@ actor ItemDatabase {
                 oc_id TEXT PRIMARY KEY,
                 etag TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tus_uploads (
+                fingerprint TEXT PRIMARY KEY,
+                location TEXT NOT NULL,
+                created REAL NOT NULL
+            );
             CREATE TRIGGER IF NOT EXISTS listed_directories_delete AFTER DELETE ON items BEGIN
                 DELETE FROM listed_directories WHERE oc_id = OLD.oc_id;
             END;
@@ -868,6 +873,7 @@ actor ItemDatabase {
             try executeUpdate("DELETE FROM identities.item_identities")
             try executeUpdate("DELETE FROM items")
             try executeUpdate("DELETE FROM listed_directories")
+            try executeUpdate("DELETE FROM tus_uploads")
         }
     }
 
@@ -892,6 +898,31 @@ actor ItemDatabase {
                 try executeBoundUpdate("INSERT OR REPLACE INTO listed_directories(oc_id, etag) VALUES (?, ?)", values: [ocId, etag])
             }
         }
+    }
+
+    // MARK: - Resumable uploads
+
+    /// Servers expire unfinished TUS uploads; older entries are dropped rather than probed.
+    private static let tusUploadLifetime: TimeInterval = 20 * 60 * 60
+
+    func tusLocation(fingerprint: String) -> URL? {
+        try? executeBoundUpdate("DELETE FROM tus_uploads WHERE created < ?",
+                                values: [String(Date().timeIntervalSince1970 - Self.tusUploadLifetime)])
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT location FROM tus_uploads WHERE fingerprint = ?", -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, fingerprint, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return URL(string: columnString(stmt, 0))
+    }
+
+    func saveTusLocation(_ location: URL, fingerprint: String) {
+        try? executeBoundUpdate("INSERT OR REPLACE INTO tus_uploads(fingerprint, location, created) VALUES (?, ?, ?)",
+                                values: [fingerprint, location.absoluteString, String(Date().timeIntervalSince1970)])
+    }
+
+    func removeTusLocation(fingerprint: String) {
+        try? executeBoundUpdate("DELETE FROM tus_uploads WHERE fingerprint = ?", values: [fingerprint])
     }
 
     func hasChildren(parentOcId: String) -> Bool {
@@ -1116,3 +1147,5 @@ enum DatabaseError: Error, LocalizedError {
 
 // SQLite constant for binding
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+extension ItemDatabase: TusResumeStore {}
