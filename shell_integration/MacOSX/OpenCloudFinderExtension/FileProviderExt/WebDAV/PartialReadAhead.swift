@@ -26,6 +26,9 @@ actor PartialReadAhead {
     /// Read-ahead nobody asked for within this time is dropped.
     static let idleTimeout: TimeInterval = 60
     static let maximumStreams = 4
+    /// fileproviderd asks for the next range starting a little before the end of the last one
+    /// (64 KB in practice), so read-ahead starts this much earlier. A multiple of any page alignment.
+    static let overlap: Int64 = 1024 * 1024
 
     private struct Prefetch {
         let range: Range<Int64>
@@ -66,7 +69,7 @@ actor PartialReadAhead {
         }
 
         // Players skip small parts (e.g. audio interleaved with video), so a short gap still counts as sequential.
-        let sequential = stream.map { $0.nextStart <= planned.lowerBound && planned.lowerBound - $0.nextStart <= $0.unit } ?? false
+        let sequential = stream.map { $0.nextStart - Self.overlap <= planned.lowerBound && planned.lowerBound <= $0.nextStart + $0.unit } ?? false
         if !sequential, let stale = stream?.prefetch {
             discard(stale)
             streams[item]?.prefetch = nil
@@ -104,7 +107,8 @@ actor PartialReadAhead {
         // Read ahead only once the reader moves on sequentially; a single probe (e.g. the index
         // at the end of a video) does not need the following bytes.
         if sequential, stream.prefetch == nil, delivered.upperBound < fileSize {
-            let next = delivered.upperBound..<min(delivered.upperBound + Self.grown(stream.unit), fileSize)
+            let start = max(delivered.lowerBound, delivered.upperBound - Self.overlap)
+            let next = start..<min(start + Self.grown(stream.unit), fileSize)
             let file = directory.appendingPathComponent(UUID().uuidString)
             stream.prefetch = Prefetch(range: next, file: file, task: Task { try await download(next, file) })
         }

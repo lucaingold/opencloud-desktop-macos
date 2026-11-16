@@ -44,30 +44,26 @@ actor Server {
         await settle()
         check(await server.downloads == [0..<(4 * mb), (size - 4 * mb)..<size], "probes fetch only the base unit and do not read ahead")
 
-        // Playback from the start: the second read is sequential, grows and starts the read-ahead.
-        _ = try await read(4 * mb)
-        _ = try await read(8 * mb)
-        await settle()
-        check(await server.downloads.suffix(2) == [(8 * mb)..<(16 * mb), (16 * mb)..<(32 * mb)],
-              "a sequential read doubles the range and the next range is prefetched")
-
-        let hit = try await read(16 * mb)
-        check(hit.1 == (16 * mb)..<(32 * mb), "the next read is answered from the read-ahead")
-        await settle()
-        check(await server.downloads.last == (32 * mb)..<(64 * mb), "the read-ahead keeps growing")
-
-        // Growth stops at the maximum unit.
-        var position: Int64 = 32 * mb
-        for _ in 0..<4 {
-            let next = try await read(position)
-            position = next.1.upperBound
+        // Playback as fileproviderd asks for it (logged live): each read starts 64 KB before the end of the last range.
+        var last = try await read(4 * mb - 64 * 1024).1
+        var fromReadAhead = 0
+        for _ in 0..<8 {
             await settle()
+            let prefetched = await server.downloads.last!
+            let count = await server.downloads.count
+            last = try await read(last.upperBound - 64 * 1024).1
+            if last == prefetched { fromReadAhead += 1 } else { check(await server.downloads.count == count + 2, "a miss downloads directly") }
         }
-        check(await server.downloads.last.map { $0.count } == Int(PartialReadAhead.maximumUnit), "ranges are capped at the maximum unit")
+        check(fromReadAhead >= 7, "sequential reads are answered from the read-ahead (\(fromReadAhead) of 8)")
+        check(last.count == Int(PartialReadAhead.maximumUnit), "ranges grow up to the maximum unit")
+        await settle()
+        let ahead = await server.downloads.last!
+        check(ahead.lowerBound < last.upperBound - 64 * 1024 && ahead.count == Int(PartialReadAhead.maximumUnit),
+              "the read-ahead overlaps the end of the last range and stays at the maximum")
+        var position = last.upperBound
 
         // Skipping a little (interleaved audio) still counts as sequential.
-        let gapStart = position + 1 * mb
-        let gap = try await read(gapStart)
+        let gap = try await read(position + 1 * mb)
         check(gap.1.count > Int(4 * mb), "a short gap keeps the larger range")
         position = gap.1.upperBound
         await settle()
@@ -80,12 +76,13 @@ actor Server {
         check(await server.downloads.count == before + 1, "a seek does not read ahead")
 
         // A failed read-ahead falls back to a direct download.
-        await server.fail((1012 * mb)..<(1028 * mb))
+        let failing = (1011 * mb)..<(1027 * mb) // read-ahead after 1004..1012 starts 1 MB early
+        await server.fail(failing)
         _ = try await read(1004 * mb)
         await settle()
-        let recovered = try await read(1012 * mb)
-        check(recovered.1 == (1012 * mb)..<(1028 * mb), "a failed read-ahead is fetched again directly")
-        check(await server.downloads.filter { $0 == (1012 * mb)..<(1028 * mb) }.count == 2, "the failed range was downloaded twice")
+        check(await server.downloads.last == failing, "the read-ahead was requested")
+        let recovered = try await read(1012 * mb - 64 * 1024)
+        check(recovered.1.lowerBound == 1012 * mb - 64 * 1024 && recovered.1.count > Int(4 * mb), "a failed read-ahead is fetched again directly")
 
         // A new version of the file never uses read-ahead from the old one.
         let count = await server.downloads.count
