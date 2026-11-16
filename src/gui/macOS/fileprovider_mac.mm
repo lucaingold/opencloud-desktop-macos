@@ -55,6 +55,8 @@ FileProvider::FileProvider(QObject *parent, const QString &appGroupIdentifier)
     }
 
     _xpc = std::make_unique<FileProviderXPC>(this, appGroupIdentifier);
+    // An update can change the built-in ignore list, so share it before any domain asks.
+    _xpc->publishSyncOptions();
     _domainManager = std::make_unique<FileProviderDomainManager>(this, _xpc.get());
 
     // Connect domain setup completion to XPC configuration
