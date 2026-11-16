@@ -185,3 +185,7 @@ test/gui/reports
 tools/crash_reports/
 .claude
 */**/.claude
+
+# Local AI assistant settings never belong in this public repository (see tools/git-hooks).
+.claude/
+.cursor/

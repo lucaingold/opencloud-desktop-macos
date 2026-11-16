@@ -63,6 +63,18 @@ tools/update-local.sh              # merge the latest official client, run the t
 
 The script stops without installing anything if the merge conflicts or a test fails.
 
+## Contributing
+
+This repository is public. Enable the guard hooks once per clone; they block commits and pushes that contain
+credentials, keys, `.env` files, local AI assistant files or a non-anonymous commit e-mail address:
+
+```sh
+git config core.hooksPath tools/git-hooks
+```
+
+Personal patterns to block in addition (names, hosts, IDs) go into `.git/info/private-patterns`, one extended
+regular expression per line. That file is never committed.
+
 ## Planned
 
 - Sync the Desktop and Documents folders into OpenCloud (macOS "known folders"), like iCloud Drive offers
