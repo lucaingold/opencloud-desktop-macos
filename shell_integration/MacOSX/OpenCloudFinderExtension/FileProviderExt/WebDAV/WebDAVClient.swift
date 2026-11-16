@@ -168,6 +168,15 @@ actor WebDAVClient {
         return components?.url
     }
     
+    /// The path inside the space, e.g. "/folder/file.txt", for both stored forms of a remote path:
+    /// relative to the space or the full DAV path that listings return.
+    func spaceRelativePath(_ remotePath: String) -> String {
+        let path = remotePath.hasPrefix("/") ? remotePath : "/" + remotePath
+        let root = davPath.hasSuffix("/") ? String(davPath.dropLast()) : davPath
+        let inside = !root.isEmpty && (path == root || path.hasPrefix(root + "/")) ? String(path.dropFirst(root.count)) : path
+        return "/" + inside.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     /// Add authentication and common headers to request
     func authenticatedRequest(url: URL, method: String) -> URLRequest {
         var request = URLRequest(url: url)
@@ -448,7 +457,8 @@ actor WebDAVClient {
         let checksum = try Self.checksum(of: localURL, type: tus.checksumType)
         let mtime = modificationDate.map { String(Int64($0.timeIntervalSince1970.rounded(.down))) } ?? ""
         let fingerprint = [remotePath, String(size), mtime, checksum.value].joined(separator: "\u{0}")
-        let path = "/" + remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        // The server resolves the filename metadata inside the space, never as a DAV URL path.
+        let path = spaceRelativePath(remotePath)
         let chunkLimit = tus.maxChunkSize > 0 ? min(tus.maxChunkSize, Self.tusChunkSize) : Self.tusChunkSize
         progress?.kind = .file
         progress?.fileOperationKind = .uploading

@@ -238,6 +238,13 @@ actor MemoryResumeStore: TusResumeStore {
         } catch WebDAVError.conflict {}
         check(!MockTusProtocol.requests.contains { $0.method == "POST" }, "no upload is created over an existing file")
 
+        // Items below the root store the full DAV path; the server expects the path inside the space.
+        MockTusProtocol.reset()
+        dav = client()
+        _ = try await dav.uploadFile(from: file, to: "/dav/spaces/space-1/folder/deep/video.mp4", progress: nil, modificationDate: mtime)
+        check(decodedMetadata(MockTusProtocol.uploads.values.first!.metadata)["filename"] == "/folder/deep/video.mp4",
+              "filename metadata never contains the DAV prefix")
+
         // Servers without TUS keep the single-request upload.
         MockTusProtocol.reset()
         MockTusProtocol.tusExtensions = nil
