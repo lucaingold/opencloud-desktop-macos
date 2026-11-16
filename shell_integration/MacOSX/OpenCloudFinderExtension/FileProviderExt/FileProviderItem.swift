@@ -18,7 +18,7 @@ import UniformTypeIdentifiers
 
 /// Implementation of NSFileProviderItem protocol representing a file or folder.
 /// Initialized from ItemMetadata (database) or directly for special containers.
-final class FileProviderItem: NSObject, NSFileProviderItem {
+final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorating {
     
     // MARK: - Stored Properties
     
@@ -85,11 +85,41 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     
     var userInfo: [AnyHashable: Any]? {
         ["openCloudActions": metadata != nil && !itemIsTrashed,
+         "openCloudLocked": metadata?.lockOwner != nil,
          "openCloudCanShowVersions": metadata != nil && !itemIsTrashed && metadata?.isDirectory == false,
          "openCloudCanShare": metadata != nil && !itemIsTrashed && (metadata?.permissions.uppercased().contains("R") ?? false)]
     }
 
     var itemIsTrashed: Bool { metadata?.isTrashed ?? false }
+
+    // MARK: - Sharing and locks
+
+    /// The server marks items owned by someone else with "S" in oc:permissions (shared with the user).
+    private var isSharedWithCurrentUser: Bool { metadata?.permissions.uppercased().contains("S") ?? false }
+    /// oc:share-types lists the shares the user created on the item.
+    private var isSharedByCurrentUserOnServer: Bool { !(metadata?.shareTypes.isEmpty ?? true) }
+
+    var isShared: Bool { isSharedWithCurrentUser || isSharedByCurrentUserOnServer }
+    var isSharedByCurrentUser: Bool { isSharedByCurrentUserOnServer && !isSharedWithCurrentUser }
+
+    /// Finder shows "Shared by <owner>" for items shared with the user.
+    var ownerNameComponents: PersonNameComponents? {
+        guard isSharedWithCurrentUser, let metadata,
+              let name = [metadata.ownerDisplayName, metadata.ownerId].first(where: { !$0.isEmpty }) else { return nil }
+        return PersonNameComponentsFormatter().personNameComponents(from: name) ?? {
+            var components = PersonNameComponents()
+            components.nickname = name
+            return components
+        }()
+    }
+
+    static let lockedDecoration = NSFileProviderItemDecorationIdentifier(
+        (Bundle.main.bundleIdentifier ?? "eu.opencloud.desktop.FileProviderExt") + ".locked")
+
+    /// A lock badge on files locked on the server, e.g. while open in the web office.
+    var decorations: [NSFileProviderItemDecorationIdentifier]? {
+        metadata?.lockOwner != nil && !itemIsTrashed ? [Self.lockedDecoration] : nil
+    }
 
     var contentPolicy: NSFileProviderContentPolicy {
         if itemIdentifier == .rootContainer { return .downloadLazily }
@@ -130,7 +160,8 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
                       creationDate.map { String($0.timeIntervalSince1970) } ?? "",
                       contentModificationDate.map { String($0.timeIntervalSince1970) } ?? "",
                       String(_isDownloaded), String(_isDownloading), String(_isUploaded), String(_isUploading),
-                      localMetadata, metadata?.statusError ?? "", String(metadata?.status.rawValue ?? 0)]
+                      localMetadata, metadata?.statusError ?? "", String(metadata?.status.rawValue ?? 0),
+                      metadata?.shareTypes.map(String.init).joined(separator: ",") ?? "", metadata?.lockOwner ?? "-"]
         let metadataData = (try? JSONSerialization.data(withJSONObject: values)) ?? Data()
         // FileProvider limits each version component to 128 bytes.
         return NSFileProviderItemVersion(contentVersion: contentData, metadataVersion: Data(SHA256.hash(data: metadataData)))

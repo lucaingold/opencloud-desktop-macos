@@ -63,6 +63,8 @@ actor WebDAVClient {
                 <oc:permissions/>
                 <oc:owner-id/>
                 <oc:owner-display-name/>
+                <oc:share-types/>
+                <d:lockdiscovery/>
             </d:prop>
         </d:propfind>
         """.data(using: .utf8)!
@@ -342,6 +344,75 @@ actor WebDAVClient {
         }
     }
     
+    /// Files up to this size are fetched whole: a range request saves little and the file becomes fully available.
+    static let partialFetchMinimumFileSize: Int64 = 32 * 1024 * 1024
+    /// Requested ranges are widened to at least this size so playback does not issue a request per page.
+    static let partialFetchUnit: Int64 = 4 * 1024 * 1024
+
+    /// The range to fetch for a request: aligned as the system requires, at least `partialFetchUnit` long,
+    /// and nil when the whole file should be fetched instead.
+    static func partialFetchRange(requested: NSRange, alignment: Int, fileSize: Int64) -> Range<Int64>? {
+        guard fileSize > partialFetchMinimumFileSize, alignment > 0 else { return nil }
+        let align = Int64(alignment)
+        let start = Int64(requested.location) / align * align
+        let requestedEnd = Int64(requested.location) + Int64(requested.length)
+        var end = max(requestedEnd, start + partialFetchUnit)
+        end = (end + align - 1) / align * align
+        // The end of the file is the only end that may be unaligned.
+        end = min(end, fileSize)
+        guard start < end, start > 0 || end < fileSize else { return nil }
+        return start..<end
+    }
+
+    /// Download `range` of a file into `fileURL` at the same offsets (other parts of the file stay sparse).
+    /// Returns the range the server delivered: the requested one, or the whole file if it ignores Range.
+    func downloadRange(remotePath: String, range: Range<Int64>, into fileURL: URL, ifMatchEtag: String?, progress: Progress?) async throws -> Range<Int64> {
+        guard let url = url(for: remotePath) else { throw WebDAVError.invalidURL }
+        var request = authenticatedRequest(url: url, method: "GET")
+        request.setValue("bytes=\(range.lowerBound)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
+        if let etag = ifMatchEtag { request.setValue(Self.quotedETag(etag), forHTTPHeaderField: "If-Match") }
+        let transfer = TransferProgressDelegate(progress: progress)
+        let (tempURL, response) = try await session.download(for: request, delegate: transfer)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        guard let http = response as? HTTPURLResponse else { throw WebDAVError.networkError(URLError(.badServerResponse)) }
+        let delivered: Range<Int64>
+        switch http.statusCode {
+        case 206:
+            // Content-Range: bytes <first>-<last>/<total>
+            guard let header = http.value(forHTTPHeaderField: "Content-Range"), header.hasPrefix("bytes "),
+                  let span = header.dropFirst(6).split(separator: "/").first,
+                  case let bounds = span.split(separator: "-"), bounds.count == 2,
+                  let first = Int64(bounds[0]), let last = Int64(bounds[1]), last >= first else {
+                throw WebDAVError.parseError("Invalid Content-Range")
+            }
+            delivered = first..<(last + 1)
+        case 200:
+            let size = Int64((try tempURL.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+            delivered = 0..<size
+        case 401: throw WebDAVError.notAuthenticated
+        case 403: throw WebDAVError.permissionDenied
+        case 404: throw WebDAVError.fileNotFound
+        case 412: throw WebDAVError.conflict
+        default: throw WebDAVError.httpError(statusCode: http.statusCode, message: nil)
+        }
+        let received = Int64((try tempURL.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+        guard received == Int64(delivered.count), delivered.lowerBound <= range.lowerBound, delivered.upperBound >= range.upperBound else {
+            throw WebDAVError.parseError("Incomplete range response")
+        }
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+        }
+        let source = try FileHandle(forReadingFrom: tempURL)
+        defer { try? source.close() }
+        let destination = try FileHandle(forWritingTo: fileURL)
+        defer { try? destination.close() }
+        try destination.seek(toOffset: UInt64(delivered.lowerBound))
+        while let chunk = try source.read(upToCount: 1 << 20), !chunk.isEmpty {
+            try destination.write(contentsOf: chunk)
+        }
+        return delivered
+    }
+
     /// Upload a file from a local URL
     /// - Parameter ifMatchEtag: If set, sends If-Match header for conflict detection (412 on mismatch)
     func uploadFile(from localURL: URL, to remotePath: String, ifMatchEtag: String? = nil, ifNoneMatch: Bool = false, progress: Progress? = nil, modificationDate: Date? = nil,

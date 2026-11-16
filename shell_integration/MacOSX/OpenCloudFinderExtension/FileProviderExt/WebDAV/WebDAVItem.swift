@@ -182,6 +182,12 @@ struct WebDAVItem: Sendable {
     
     /// Owner display name
     let ownerDisplayName: String
+
+    /// Share types of shares the current user created on this item (oc:share-types); empty if not shared by them.
+    var shareTypes: [Int] = []
+
+    /// Set when the item is locked (DAV lockdiscovery): the lock owner, or "" if the server does not name one.
+    var lockOwner: String? = nil
     
     /// Parent remote path (e.g., "/remote.php/webdav/Documents" for "/remote.php/webdav/Documents/file.txt")
     var parentPath: String {

@@ -17,8 +17,9 @@ private final class MockTusProtocol: URLProtocol {
     static var postStatus = 201
     /// Paths that do not exist yet; PROPFIND answers 404 until an upload completes.
     static var missing: Set<String> = []
+    static var ignoreRange = false
     static func reset() {
-        uploads = [:]; requests = []; putBodies = [:]; dropPatch = nil; failPatches = nil; patchCount = 0; postStatus = 201; missing = []
+        uploads = [:]; requests = []; putBodies = [:]; dropPatch = nil; failPatches = nil; patchCount = 0; postStatus = 201; missing = []; ignoreRange = false
         tusExtensions = "creation,creation-with-upload,checksum"
     }
 
@@ -92,6 +93,12 @@ private final class MockTusProtocol: URLProtocol {
             Self.uploads[path] = upload
             if upload.data.count == upload.length { Self.missing = [] }
             respond(204, ["Upload-Offset": String(upload.data.count)])
+        case "GET":
+            let file = Data((0..<100).map { UInt8($0) })
+            guard let range = request.value(forHTTPHeaderField: "Range"), !Self.ignoreRange else { return respond(200, [:], file) }
+            let bounds = range.dropFirst(6).split(separator: "-").compactMap { Int($0) }
+            let last = min(bounds[1], file.count - 1)
+            respond(206, ["Content-Range": "bytes \(bounds[0])-\(last)/\(file.count)"], file.subdata(in: bounds[0]..<(last + 1)))
         case "PROPFIND":
             if Self.missing.contains(path) { return respond(404) }
             let xml = """
@@ -244,6 +251,34 @@ actor MemoryResumeStore: TusResumeStore {
         _ = try await dav.uploadFile(from: file, to: "/dav/spaces/space-1/folder/deep/video.mp4", progress: nil, modificationDate: mtime)
         check(decodedMetadata(MockTusProtocol.uploads.values.first!.metadata)["filename"] == "/folder/deep/video.mp4",
               "filename metadata never contains the DAV prefix")
+
+        // Partial downloads: aligned ranges of at least 4 MB, only for large files, never past the end.
+        let mb: Int64 = 1024 * 1024
+        check(WebDAVClient.partialFetchRange(requested: NSRange(location: 0, length: 4096), alignment: 4096, fileSize: 16 * mb) == nil,
+              "small files are fetched whole")
+        check(WebDAVClient.partialFetchRange(requested: NSRange(location: 5000, length: 10), alignment: 4096, fileSize: 1024 * mb) == 4096..<(4096 + 4 * mb),
+              "a small read is aligned down and widened to the fetch unit")
+        let tail = WebDAVClient.partialFetchRange(requested: NSRange(location: Int(100 * mb - 10), length: 10), alignment: 4096, fileSize: 100 * mb)
+        check(tail?.upperBound == 100 * mb && tail!.lowerBound % 4096 == 0, "a read at the end stops at the file size")
+        check(WebDAVClient.partialFetchRange(requested: NSRange(location: 0, length: Int(100 * mb)), alignment: 4096, fileSize: 100 * mb) == nil,
+              "a request for the whole file is a full download")
+
+        MockTusProtocol.reset()
+        let sparse = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: sparse) }
+        let got = try await client().downloadRange(remotePath: "/media/video.mp4", range: 40..<60, into: sparse, ifMatchEtag: "v1", progress: nil)
+        let written = try Data(contentsOf: sparse)
+        check(got == 40..<60 && written.count == 60 && written.subdata(in: 40..<60) == Data((40..<60).map { UInt8($0) }),
+              "a range lands at its own offset in the file")
+        let get = MockTusProtocol.requests.first { $0.method == "GET" }!
+        check(get.headers["Range"] == "bytes=40-59" && get.headers["If-Match"] == "\"v1\"", "the range request is pinned to the version")
+        MockTusProtocol.reset()
+        MockTusProtocol.ignoreRange = true
+        let whole = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: whole) }
+        let full = try await client().downloadRange(remotePath: "/media/video.mp4", range: 40..<60, into: whole, ifMatchEtag: nil, progress: nil)
+        let wholeData = try Data(contentsOf: whole)
+        check(full == 0..<100 && wholeData == Data((0..<100).map { UInt8($0) }), "a server without range support delivers the whole file")
 
         // Servers without TUS keep the single-request upload.
         MockTusProtocol.reset()

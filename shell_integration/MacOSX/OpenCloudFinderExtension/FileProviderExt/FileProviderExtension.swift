@@ -1366,3 +1366,92 @@ private class MaterializedEnumerationObserver: NSObject, NSFileProviderEnumerati
         completionHandler()
     }
 }
+
+// MARK: - Partial content (large media and documents open without a full download)
+
+extension FileProviderExtension: NSFileProviderPartialContentFetching {
+    func fetchPartialContents(for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion,
+                              request: NSFileProviderRequest, minimalRange requestedRange: NSRange, aligningTo alignment: Int,
+                              options: NSFileProviderFetchContentsOptions,
+                              completionHandler: @escaping (URL?, NSFileProviderItem?, NSRange, NSFileProviderMaterializationFlags, Error?) -> Void) -> Progress {
+        let status = syncStatus
+        let operation = status.begin(.download, key: "download:" + itemIdentifier.rawValue)
+        let deliver = completionHandler
+        let completionHandler: (URL?, NSFileProviderItem?, NSRange, NSFileProviderMaterializationFlags, Error?) -> Void = { url, item, range, flags, error in
+            status.finish(operation, error: error)
+            deliver(url, item, range, flags, error)
+        }
+        let progress = Progress(totalUnitCount: 100)
+        let task = Task {
+            guard let webdav = self.webdavClient, let database = self.database else {
+                completionHandler(nil, nil, requestedRange, [], NSFileProviderError(.notAuthenticated))
+                return
+            }
+            do {
+                var metadata = await database.itemMetadata(ocId: itemIdentifier.rawValue)
+                if metadata == nil {
+                    metadata = try await resolveItemFromServer(identifier: itemIdentifier, webdav: webdav, database: database)
+                }
+                guard let metadata else { throw NSError.fileProviderErrorForNonExistentItem(withIdentifier: itemIdentifier) }
+                guard !metadata.isTrashed else { throw CocoaError(.featureUnsupported) }
+                let parent = metadata.parentOcId == ItemDatabase.rootContainerId
+                    ? NSFileProviderItemIdentifier.rootContainer : NSFileProviderItemIdentifier(metadata.parentOcId)
+                let requestedETag = String(data: requestedVersion.contentVersion, encoding: .utf8) ?? ""
+                let versionMatches = requestedETag == metadata.etag
+
+                guard versionMatches || !options.contains(.strictVersioning),
+                      let range = WebDAVClient.partialFetchRange(requested: requestedRange, alignment: alignment, fileSize: metadata.size) else {
+                    if !versionMatches && options.contains(.strictVersioning) {
+                        throw NSFileProviderError(.versionNoLongerAvailable)
+                    }
+                    // Small file, whole-file request, or a newer version: deliver the current file in full.
+                    let (url, item) = try await self.downloadContents(metadata: metadata, webdav: webdav, database: database, progress: progress)
+                    let size = (item.documentSize?.intValue) ?? Int(metadata.size)
+                    completionHandler(url, item, NSRange(location: 0, length: size), [], nil)
+                    self.signalEnumerator(for: parent)
+                    return
+                }
+
+                let directory = (try? NSFileProviderManager(for: self.domain)?.temporaryDirectoryURL()) ?? FileManager.default.temporaryDirectory
+                let fileURL = directory.appendingPathComponent(UUID().uuidString)
+                var delivered = false
+                defer { if !delivered { try? FileManager.default.removeItem(at: fileURL) } }
+                let retrieved: Range<Int64>
+                do {
+                    retrieved = try await webdav.downloadRange(remotePath: metadata.remotePath, range: range, into: fileURL,
+                                                               ifMatchEtag: metadata.etag.isEmpty ? nil : metadata.etag, progress: progress)
+                } catch WebDAVError.conflict {
+                    // The file changed on the server: let the system pick up the new version.
+                    self.signalEnumerator(for: parent)
+                    throw NSFileProviderError(.versionNoLongerAvailable)
+                }
+                try Task.checkCancellation()
+                delivered = true
+                progress.completedUnitCount = progress.totalUnitCount
+                let item = FileProviderItem(metadata: metadata, parentItemIdentifier: parent, supportsTrash: self.supportsTrash)
+                completionHandler(fileURL, item, NSRange(location: Int(retrieved.lowerBound), length: Int(retrieved.count)), [], nil)
+            } catch {
+                if case WebDAVError.notAuthenticated = error { self.markAuthenticationExpired(for: webdav) }
+                completionHandler(nil, nil, requestedRange, [], fileProviderError(error, itemIdentifier: itemIdentifier))
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
+    }
+}
+
+/// "Don't show again" for the warnings in Info.plist (NSFileProviderUserInteractions), for all of the user's domains.
+extension FileProviderExtension: NSFileProviderUserInteractionSuppressing {
+    private static let suppressedInteractionsKey = "fp_suppressed_interactions"
+
+    func setInteractionSuppressed(_ suppression: Bool, forIdentifier suppressionIdentifier: String) {
+        let defaults = UserDefaults(suiteName: appGroupIdentifier)
+        var suppressed = Set(defaults?.stringArray(forKey: Self.suppressedInteractionsKey) ?? [String]())
+        if suppression { suppressed.insert(suppressionIdentifier) } else { suppressed.remove(suppressionIdentifier) }
+        defaults?.set(suppressed.sorted(), forKey: Self.suppressedInteractionsKey)
+    }
+
+    func isInteractionSuppressed(forIdentifier suppressionIdentifier: String) -> Bool {
+        UserDefaults(suiteName: appGroupIdentifier)?.stringArray(forKey: Self.suppressedInteractionsKey)?.contains(suppressionIdentifier) ?? false
+    }
+}

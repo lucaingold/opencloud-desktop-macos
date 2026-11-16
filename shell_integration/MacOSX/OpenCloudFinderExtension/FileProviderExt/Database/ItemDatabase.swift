@@ -79,8 +79,29 @@ actor ItemDatabase {
         try Self.createTables(db: dbHandle, changeRetentionLimit: max(1, changeRetentionLimit))
     }
     
+    /// Columns added after the first release, appended to existing item tables before the schema
+    /// (whose triggers reference them) is applied. New tables already contain them.
+    private static func migrateColumns(db: OpaquePointer?) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT name FROM pragma_table_info('items')", -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.createTableFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        var columns = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let name = sqlite3_column_text(stmt, 0) { columns.insert(String(cString: name)) }
+        }
+        sqlite3_finalize(stmt)
+        guard !columns.isEmpty else { return }
+        for (name, definition) in [("share_types", "TEXT NOT NULL DEFAULT ''"), ("lock_owner", "TEXT")] where !columns.contains(name) {
+            guard sqlite3_exec(db, "ALTER TABLE items ADD COLUMN \(name) \(definition)", nil, nil, nil) == SQLITE_OK else {
+                throw DatabaseError.createTableFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
     /// Static helper for table creation - doesn't require actor isolation
     private static func createTables(db: OpaquePointer?, changeRetentionLimit: Int) throws {
+        try migrateColumns(db: db)
         let createSQL = """
             BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS identities.item_identities (
@@ -120,7 +141,9 @@ actor ItemDatabase {
                 is_uploading INTEGER NOT NULL DEFAULT 0,
                 status INTEGER NOT NULL DEFAULT 0,
                 status_error TEXT,
-                sync_time REAL NOT NULL
+                sync_time REAL NOT NULL,
+                share_types TEXT NOT NULL DEFAULT '',
+                lock_owner TEXT
             );
             
             CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_oc_id);
@@ -165,7 +188,8 @@ actor ItemDatabase {
             CREATE TRIGGER IF NOT EXISTS items_insert AFTER INSERT ON items BEGIN
                 INSERT INTO item_changes(oc_id, parent_oc_id) VALUES (NEW.oc_id, NEW.parent_oc_id);
             END;
-            CREATE TRIGGER IF NOT EXISTS items_update AFTER UPDATE ON items
+            DROP TRIGGER IF EXISTS items_update;
+            CREATE TRIGGER items_update AFTER UPDATE ON items
                 WHEN OLD.remote_path IS NOT NEW.remote_path
                   OR OLD.is_downloaded IS NOT NEW.is_downloaded
                   OR OLD.is_downloading IS NOT NEW.is_downloading
@@ -174,6 +198,8 @@ actor ItemDatabase {
                   OR OLD.status IS NOT NEW.status
                   OR OLD.status_error IS NOT NEW.status_error
                   OR OLD.size IS NOT NEW.size
+                  OR OLD.share_types IS NOT NEW.share_types
+                  OR OLD.lock_owner IS NOT NEW.lock_owner
                 BEGIN
                 INSERT INTO item_changes(oc_id, parent_oc_id) VALUES (NEW.oc_id, NEW.parent_oc_id);
             END;
@@ -653,8 +679,9 @@ actor ItemDatabase {
                 oc_id, file_id, parent_oc_id, remote_path, filename, etag,
                 content_type, size, last_modified, creation_date, is_directory,
                 permissions, owner_id, owner_display_name, is_downloaded,
-                is_downloading, is_uploaded, is_uploading, status, status_error, sync_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_downloading, is_uploaded, is_uploading, status, status_error, sync_time,
+                share_types, lock_owner
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         
         var stmt: OpaquePointer?
@@ -705,8 +732,14 @@ actor ItemDatabase {
         }
         col += 1
         
-        sqlite3_bind_double(stmt, col, metadata.syncTime.timeIntervalSince1970)
-        
+        sqlite3_bind_double(stmt, col, metadata.syncTime.timeIntervalSince1970); col += 1
+        sqlite3_bind_text(stmt, col, metadata.shareTypes.map(String.init).joined(separator: ","), -1, SQLITE_TRANSIENT); col += 1
+        if let lockOwner = metadata.lockOwner {
+            sqlite3_bind_text(stmt, col, lockOwner, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, col)
+        }
+
         if sqlite3_step(stmt) != SQLITE_DONE {
             let error = String(cString: sqlite3_errmsg(db))
             throw DatabaseError.insertFailed(error)
@@ -1092,9 +1125,12 @@ actor ItemDatabase {
         }
         col += 1
         
-        let syncTime = Date(timeIntervalSince1970: sqlite3_column_double(stmt, col))
-        
-        return ItemMetadata(
+        let syncTime = Date(timeIntervalSince1970: sqlite3_column_double(stmt, col)); col += 1
+        // Added later: older databases get them appended by migrateColumns().
+        let shareTypes = columnString(stmt, col).split(separator: ",").compactMap { Int($0) }; col += 1
+        let lockOwner: String? = sqlite3_column_type(stmt, col) == SQLITE_NULL ? nil : columnString(stmt, col)
+
+        var metadata = ItemMetadata(
             ocId: ocId,
             fileId: fileId,
             parentOcId: parentOcId,
@@ -1118,6 +1154,9 @@ actor ItemDatabase {
             syncTime: syncTime,
             finderMetadata: (try? localMetadata(ocId: ocId)) ?? FinderMetadata()
         )
+        metadata.shareTypes = shareTypes
+        metadata.lockOwner = lockOwner
+        return metadata
     }
 }
 

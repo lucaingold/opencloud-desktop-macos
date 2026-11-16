@@ -76,6 +76,110 @@
         </array>
         <key>NSExtensionFileProviderSupportsEnumeration</key>
         <true/>
+        <!-- Badge for files locked on the server, e.g. while open in the web office (FileProviderItem.decorations). -->
+        <key>NSFileProviderDecorations</key>
+        <array>
+            <dict>
+                <key>Identifier</key>
+                <string>$(OC_APPLICATION_REV_DOMAIN).$(PRODUCT_NAME:rfc1034identifier).locked</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.icon-decoration.badge.locked</string>
+                <key>Category</key>
+                <string>Badge</string>
+                <key>Label</key>
+                <string>Locked on the server</string>
+            </dict>
+        </array>
+        <!-- Warnings before actions whose effect reaches beyond this Mac. -->
+        <key>NSFileProviderUserInteractions</key>
+        <array>
+            <dict>
+                <key>ActivationRule</key>
+                <string>(action == "Trash" OR action == "Delete") AND sourceItem.isShared == YES AND sourceItem.isSharedByCurrentUser == NO</string>
+                <key>Alert</key>
+                <dict>
+                    <key>LocalizedTitle</key>
+                    <dict>
+                        <key>NSStringFormat</key>
+                        <string>Delete items from a share?</string>
+                    </dict>
+                    <key>LocalizedSubTitle</key>
+                    <dict>
+                        <key>NSStringFormat</key>
+                        <string>They are deleted for the owner and everyone with access to the share, not only on this Mac.</string>
+                    </dict>
+                    <key>LocalizedRecoveryOptions</key>
+                    <dict>
+                        <key>Continue</key>
+                        <string>Delete</string>
+                    </dict>
+                    <key>RecoveryOptions</key>
+                    <dict>
+                        <key>Destructive</key>
+                        <true/>
+                    </dict>
+                </dict>
+            </dict>
+            <dict>
+                <key>ActivationRule</key>
+                <string>(action == "Trash" OR action == "Delete") AND sourceItem.isSharedByCurrentUser == YES</string>
+                <key>Alert</key>
+                <dict>
+                    <key>LocalizedTitle</key>
+                    <dict>
+                        <key>NSStringFormat</key>
+                        <string>Delete shared items?</string>
+                    </dict>
+                    <key>LocalizedSubTitle</key>
+                    <dict>
+                        <key>NSStringFormat</key>
+                        <string>People you shared them with lose access.</string>
+                    </dict>
+                    <key>LocalizedRecoveryOptions</key>
+                    <dict>
+                        <key>Continue</key>
+                        <string>Delete</string>
+                    </dict>
+                    <key>RecoveryOptions</key>
+                    <dict>
+                        <key>Destructive</key>
+                        <true/>
+                    </dict>
+                </dict>
+            </dict>
+            <dict>
+                <key>ActivationRule</key>
+                <string>action == "MoveOut"</string>
+                <key>SuppressionIdentifier</key>
+                <string>moveOut</string>
+                <!-- The SDK documents both spellings. -->
+                <key>SupressionIdentifier</key>
+                <string>moveOut</string>
+                <key>Alert</key>
+                <dict>
+                    <key>LocalizedTitle</key>
+                    <dict>
+                        <key>NSStringFormat</key>
+                        <string>Move items out of OpenCloud?</string>
+                    </dict>
+                    <key>LocalizedSubTitle</key>
+                    <dict>
+                        <key>NSStringFormat</key>
+                        <string>They are removed from the server and are no longer available on your other devices or to people you shared them with. Copy them instead to keep them in OpenCloud.</string>
+                    </dict>
+                    <key>LocalizedRecoveryOptions</key>
+                    <dict>
+                        <key>Continue</key>
+                        <string>Move</string>
+                    </dict>
+                    <key>RecoveryOptions</key>
+                    <dict>
+                        <key>Destructive</key>
+                        <false/>
+                    </dict>
+                </dict>
+            </dict>
+        </array>
     </dict>
     <key>AppGroupIdentifier</key>
     <string>$(TeamIdentifierPrefix)eu.opencloud.desktop</string>

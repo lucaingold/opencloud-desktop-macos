@@ -60,6 +60,12 @@ struct ItemMetadata: Sendable, Equatable {
     /// Owner display name
     let ownerDisplayName: String
     
+    /// Share types of shares the current user created on this item; empty if not shared by them.
+    var shareTypes: [Int] = []
+
+    /// The lock owner when the item is locked on the server ("" if unnamed), otherwise nil.
+    var lockOwner: String?
+
     /// Whether the file is downloaded locally
     var isDownloaded: Bool
     
@@ -111,6 +117,8 @@ struct ItemMetadata: Sendable, Equatable {
         self.permissions = webDAVItem.permissions
         self.ownerId = webDAVItem.ownerId
         self.ownerDisplayName = webDAVItem.ownerDisplayName
+        self.shareTypes = webDAVItem.shareTypes
+        self.lockOwner = webDAVItem.lockOwner
         self.isDownloaded = false
         self.isDownloading = false
         self.isUploaded = true  // Items from server are already uploaded

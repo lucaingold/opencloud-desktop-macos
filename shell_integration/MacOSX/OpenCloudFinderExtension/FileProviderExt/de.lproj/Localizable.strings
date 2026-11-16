@@ -10,3 +10,16 @@
 "The server has insufficient storage." = "Auf dem Server ist nicht genügend Speicherplatz frei.";
 "Some items could not be synced." = "Einige Objekte konnten nicht synchronisiert werden.";
 "Permission is required to sync some items." = "Für die Synchronisation einiger Objekte fehlt die Berechtigung.";
+
+/* Finder badge for files locked on the server (NSFileProviderDecorations in Info.plist). */
+"Locked on the server" = "Auf dem Server gesperrt";
+
+/* Warnings before Finder actions (NSFileProviderUserInteractions in Info.plist). */
+"Delete items from a share?" = "Objekte aus einer Freigabe löschen?";
+"They are deleted for the owner and everyone with access to the share, not only on this Mac." = "Sie werden für den Eigentümer und alle mit Zugriff auf die Freigabe gelöscht, nicht nur auf diesem Mac.";
+"Delete" = "Löschen";
+"Delete shared items?" = "Geteilte Objekte löschen?";
+"People you shared them with lose access." = "Personen, mit denen Sie die Objekte geteilt haben, verlieren den Zugriff.";
+"Move items out of OpenCloud?" = "Objekte aus OpenCloud verschieben?";
+"They are removed from the server and are no longer available on your other devices or to people you shared them with. Copy them instead to keep them in OpenCloud." = "Sie werden vom Server entfernt und sind auf Ihren anderen Geräten und für Personen, mit denen Sie sie geteilt haben, nicht mehr verfügbar. Kopieren Sie sie stattdessen, um sie in OpenCloud zu behalten.";
+"Move" = "Verschieben";

@@ -35,6 +35,8 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
     private var currentStatus: String = ""
     private var beforePropstat: ResponseBuilder?
     private var sawMultistatus = false
+    /// Inside DAV:lockdiscovery, whose nested elements (href, owner) must not be read as item properties.
+    private var isInLockDiscovery = false
     private var invalidResponse = false
     
     /// Date formatters for parsing dates
@@ -93,6 +95,9 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
             sawMultistatus = namespaceURI == "DAV:"
         case "response":
             currentResponse = ResponseBuilder()
+            isInLockDiscovery = false
+        case "lockdiscovery":
+            isInLockDiscovery = true
         case "propstat":
             isInPropstat = true
             currentStatus = ""
@@ -110,6 +115,22 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
         let trimmedText = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard var response = currentResponse else { return }
+
+        if isInLockDiscovery {
+            switch elementName {
+            case "lockdiscovery":
+                isInLockDiscovery = false
+            case "owner":
+                if !trimmedText.isEmpty { response.lockOwner = trimmedText }
+            case "activelock":
+                if response.lockOwner == nil { response.lockOwner = "" }
+            default:
+                break
+            }
+            currentResponse = response
+            currentText = ""
+            return
+        }
 
         switch elementName {
         case "response":
@@ -190,6 +211,11 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
                 response.ownerDisplayName = trimmedText
             }
 
+        case "share-type": // oc:share-types/oc:share-type
+            if let type = Int(trimmedText) {
+                response.shareTypes.append(type)
+            }
+
         case "resourcetype":
             break
 
@@ -238,6 +264,8 @@ private struct ResponseBuilder {
     var permissions: String = ""
     var ownerId: String = ""
     var ownerDisplayName: String = ""
+    var shareTypes: [Int] = []
+    var lockOwner: String?
     var isDirectory: Bool = false
     
     func build(baseURL: URL) -> WebDAVItem? {
@@ -294,7 +322,9 @@ private struct ResponseBuilder {
             isDirectory: isDir,
             permissions: permissions,
             ownerId: ownerId,
-            ownerDisplayName: ownerDisplayName
+            ownerDisplayName: ownerDisplayName,
+            shareTypes: shareTypes,
+            lockOwner: lockOwner
         )
     }
 }

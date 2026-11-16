@@ -196,6 +196,37 @@ struct DatabaseTests {
         let isolatedFinder = try ItemDatabase(containerURL: container, domainIdentifier: "finder-other")
         let isolatedItem = try await isolatedFinder.mergeServerMetadata(metadata("finder-file"))
         require(isolatedItem.finderMetadata == FinderMetadata(), "Finder metadata must stay private to its domain")
+
+        // Databases from before share and lock columns are migrated in place, keeping their items.
+        let legacyDir = container.appendingPathComponent("legacy").appendingPathComponent("FileProvider")
+        try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+        var legacyHandle: OpaquePointer?
+        require(sqlite3_open(legacyDir.appendingPathComponent("items-legacy.sqlite").path, &legacyHandle) == SQLITE_OK, "legacy database opens")
+        require(sqlite3_exec(legacyHandle, """
+            CREATE TABLE items (oc_id TEXT PRIMARY KEY, file_id TEXT NOT NULL, parent_oc_id TEXT NOT NULL, remote_path TEXT NOT NULL,
+                filename TEXT NOT NULL, etag TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, last_modified REAL,
+                creation_date REAL, is_directory INTEGER NOT NULL, permissions TEXT NOT NULL, owner_id TEXT NOT NULL,
+                owner_display_name TEXT NOT NULL, is_downloaded INTEGER NOT NULL DEFAULT 0, is_downloading INTEGER NOT NULL DEFAULT 0,
+                is_uploaded INTEGER NOT NULL DEFAULT 1, is_uploading INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0,
+                status_error TEXT, sync_time REAL NOT NULL);
+            INSERT INTO items VALUES ('old', 'old', '__root__', '/old', 'old', 'v1', '', 1, NULL, NULL, 0, 'RW', 'me', 'Me', 0, 0, 1, 0, 0, NULL, 0);
+            """, nil, nil, nil) == SQLITE_OK, "legacy schema is created")
+        sqlite3_close(legacyHandle)
+        let migratedDatabase = try ItemDatabase(containerURL: container.appendingPathComponent("legacy"), domainIdentifier: "legacy")
+        let old = await migratedDatabase.itemMetadata(ocId: "old")
+        require(old?.filename == "old" && old?.shareTypes.isEmpty == true && old?.lockOwner == nil, "legacy items survive the migration")
+        var shared = metadata("shared")
+        shared.shareTypes = [0, 3]
+        shared.lockOwner = "Office"
+        try await migratedDatabase.addItemMetadata(shared)
+        let sharedBack = await migratedDatabase.itemMetadata(ocId: "shared")
+        require(sharedBack?.shareTypes == [0, 3] && sharedBack?.lockOwner == "Office", "share types and lock owner round-trip")
+        let beforeUnlock = try await migratedDatabase.currentSyncAnchor()
+        var unlocked = shared
+        unlocked.lockOwner = nil
+        _ = try await migratedDatabase.mergeServerMetadata(unlocked)
+        let unlockChanges = try await migratedDatabase.changes(since: beforeUnlock, parentOcId: nil)
+        require(unlockChanges.updated.contains { $0.ocId == "shared" && $0.lockOwner == nil }, "a released lock reaches Finder as a change")
         print("FileProvider database regression tests passed")
     }
 }

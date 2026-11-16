@@ -236,6 +236,36 @@ private final class MockDAVProtocol: URLProtocol {
         let longCopy = try await client.uploadConflictCopy(from: upload, directory: "/", filename: String(repeating: "é", count: 120) + ".txt")
         check(longCopy.filename.utf8.count <= 255 && longCopy.filename.hasSuffix(".txt"),
               "conflict suffix respects filesystem byte limit for Unicode filenames")
+
+        // Sharing and locks: share types of the user's own shares, and the lock owner, never the lock root href.
+        let sharingParser = WebDAVXMLParser(baseURL: URL(string: "https://cloud.example.test/dav/spaces/s")!)
+        let sharing = sharingParser.parse(data: document("""
+            <d:response><d:href>/dav/spaces/s/shared.txt</d:href><d:propstat><d:prop>
+            <d:getetag>"e1"</d:getetag><oc:permissions>RDNVW</oc:permissions>
+            <oc:share-types><oc:share-type>0</oc:share-type><oc:share-type>3</oc:share-type></oc:share-types>
+            <d:lockdiscovery><d:activelock><d:lockscope><d:exclusive/></d:lockscope><d:owner>Web Office</d:owner>
+            <d:lockroot><d:href>/dav/spaces/s/other.txt</d:href></d:lockroot></d:activelock></d:lockdiscovery>
+            </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+            <d:response><d:href>/dav/spaces/s/plain.txt</d:href><d:propstat><d:prop>
+            <d:getetag>"e2"</d:getetag><oc:permissions>SRDNVW</oc:permissions><oc:owner-display-name>Ann Example</oc:owner-display-name>
+            <d:lockdiscovery/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+            """))
+        check(sharing?.count == 2, "both items parse")
+        check(sharing?[0].remotePath == "/dav/spaces/s/shared.txt", "a lock root href never replaces the item path")
+        check(sharing?[0].shareTypes == [0, 3], "share types are collected")
+        check(sharing?[0].lockOwner == "Web Office", "the lock owner is read")
+        check(sharing?[1].lockOwner == nil && sharing?[1].shareTypes == [], "an empty lockdiscovery means unlocked")
+
+        let mine = FileProviderItem(metadata: ItemMetadata(from: sharing![0]), parentItemIdentifier: .rootContainer)
+        check(mine.isShared && mine.isSharedByCurrentUser && mine.ownerNameComponents == nil, "the user's own share shows as shared by them")
+        check(mine.decorations?.count == 1 && mine.userInfo?["openCloudLocked"] as? Bool == true, "a locked file gets the lock badge")
+        let theirs = FileProviderItem(metadata: ItemMetadata(from: sharing![1]), parentItemIdentifier: .rootContainer)
+        check(theirs.isShared && !theirs.isSharedByCurrentUser, "an item owned by someone else shows as shared with the user")
+        check(theirs.ownerNameComponents.map { PersonNameComponentsFormatter().string(from: $0) } == "Ann Example", "Finder names the owner")
+        check(theirs.decorations == nil, "unlocked files carry no badge")
+        check(mine.itemVersion.metadataVersion != FileProviderItem(metadata: {
+            var copy = ItemMetadata(from: sharing![0]); copy.lockOwner = nil; return copy }(), parentItemIdentifier: .rootContainer).itemVersion.metadataVersion,
+              "lock changes update the metadata version so Finder refreshes the badge")
         print("FileProvider WebDAV regression tests passed")
     }
 }
