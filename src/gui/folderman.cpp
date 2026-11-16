@@ -34,6 +34,11 @@
 #ifdef Q_OS_WIN
 #include "common/utility_win.h"
 #endif
+#ifdef Q_OS_MAC
+#include "macOS/fileprovider.h"
+#include "macOS/fileprovidersettings.h"
+#include "macOS/fileproviderxpc.h"
+#endif
 
 #include <QMessageBox>
 #include <QtCore>
@@ -718,6 +723,11 @@ QString FolderMan::findGoodPathForNewSyncFolder(
 
 bool FolderMan::ignoreHiddenFiles() const
 {
+#ifdef Q_OS_MAC
+    if (_useFileProvider) {
+        return Mac::fileProviderIgnoresHiddenFiles();
+    }
+#endif
     if (_folders.empty()) {
         return true;
     }
@@ -726,6 +736,15 @@ bool FolderMan::ignoreHiddenFiles() const
 
 void FolderMan::setIgnoreHiddenFiles(bool ignore)
 {
+#ifdef Q_OS_MAC
+    if (_useFileProvider) {
+        Mac::setFileProviderIgnoresHiddenFiles(ignore);
+        if (auto *provider = Mac::FileProvider::instance()) {
+            provider->xpc()->publishSyncOptions();
+        }
+        return;
+    }
+#endif
     // Note that the setting will revert to 'true' if all folders
     // are deleted...
     for (auto *folder : std::as_const(_folders)) {
@@ -749,6 +768,14 @@ bool FolderMan::isSpaceSynced(GraphApi::Space *space) const
 
 void FolderMan::slotReloadSyncOptions()
 {
+#ifdef Q_OS_MAC
+    if (_useFileProvider) {
+        if (auto *provider = Mac::FileProvider::instance()) {
+            provider->xpc()->publishSyncOptions();
+        }
+        return;
+    }
+#endif
     for (auto *f : std::as_const(_folders)) {
         if (f) {
             f->reloadSyncOptions();

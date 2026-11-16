@@ -25,6 +25,7 @@
 
 #ifdef Q_OS_MAC
 #include "macOS/fileprovider.h"
+#include "macOS/fileproviderdomainmanager.h"
 #endif
 
 #include <QApplication>
@@ -176,7 +177,9 @@ void Systray::slotComputeOverallSyncStatus()
 #ifdef Q_OS_MAC
         const auto provider = Mac::FileProvider::instance();
         const auto error = provider->error();
-        if (!error.isEmpty()) {
+        if (provider->domainManager()->syncPaused()) {
+            setIcon(getIconFromStatus(SyncResult::Paused));
+        } else if (!error.isEmpty()) {
             setIcon(getIconFromStatus(SyncResult::Error));
         } else if (!provider->ready()) {
             setIcon(getIconFromStatus(SyncResult::SyncRunning));
@@ -242,6 +245,14 @@ void Systray::computeContextMenu()
         };
         connect(provider, &Mac::FileProvider::statusChanged, status, updateStatus);
         updateStatus();
+        auto *manager = provider->domainManager();
+        auto *pauseOnDemand = menu->addAction(QString());
+        auto updatePauseOnDemand = [pauseOnDemand, manager] {
+            pauseOnDemand->setText(manager->syncPaused() ? tr("Resume synchronizations") : tr("Pause synchronizations"));
+        };
+        connect(pauseOnDemand, &QAction::triggered, manager, [manager] { manager->setSyncPaused(!manager->syncPaused()); });
+        connect(manager, &Mac::FileProviderDomainManager::syncPausedChanged, pauseOnDemand, updatePauseOnDemand);
+        updatePauseOnDemand();
         menu->addSeparator();
     }
 #endif

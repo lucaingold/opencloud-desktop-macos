@@ -74,6 +74,7 @@ FileProvider::FileProvider(QObject *parent, const QString &appGroupIdentifier)
         _errors.remove(QStringLiteral("status:") + id);
         Q_EMIT statusChanged();
     });
+    connect(_domainManager.get(), &FileProviderDomainManager::syncPausedChanged, this, &FileProvider::statusChanged);
     connect(_domainManager.get(), &FileProviderDomainManager::nativeError, this, [this](const QString &id, const QString &message) {
         const auto key = QStringLiteral("native:") + id;
         if (message.isEmpty()) {
@@ -290,7 +291,9 @@ QString FileProvider::syncStatusText(const QUuid &account) const
             synced = synced ? qMin(synced, lastSynced) : lastSynced;
         }
     }
-    if (!errors.isEmpty()) {
+    if (_domainManager && _domainManager->syncPaused()) {
+        details.append(tr("On-demand synchronization is paused"));
+    } else if (!errors.isEmpty()) {
         details.append(tr("On-demand files need attention: %1").arg(errors.join(QLatin1Char('\n'))));
     } else if (uploads || downloads || pending || metadata) {
         details.append(tr("Synchronizing on-demand files…"));

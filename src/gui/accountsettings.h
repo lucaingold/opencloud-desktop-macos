@@ -58,6 +58,8 @@ class OPENCLOUD_GUI_EXPORT AccountSettings : public QWidget
     Q_PROPERTY(QSet<Notification> notifications READ notifications NOTIFY notificationsChanged)
     Q_PROPERTY(bool useFileProvider READ useFileProvider CONSTANT)
     Q_PROPERTY(QString onDemandSyncStatus READ onDemandSyncStatus NOTIFY onDemandSyncStatusChanged)
+    Q_PROPERTY(QVariantList onDemandSpaces READ onDemandSpaces NOTIFY onDemandSpacesChanged)
+    Q_PROPERTY(bool onDemandPaused READ onDemandPaused NOTIFY onDemandPausedChanged)
     OC_DECLARE_WIDGET_FOCUS
     QML_ELEMENT
     QML_UNCREATABLE("C++ only")
@@ -65,6 +67,11 @@ class OPENCLOUD_GUI_EXPORT AccountSettings : public QWidget
 public:
     bool useFileProvider() const;
     QString onDemandSyncStatus() const;
+    /// Spaces of this account as {id, name, personal, selected}, like the Windows space list.
+    QVariantList onDemandSpaces() const;
+    Q_INVOKABLE void setOnDemandSpaceSelected(const QString &spaceId, bool selected);
+    bool onDemandPaused() const;
+    Q_INVOKABLE void setOnDemandPaused(bool paused);
     enum class ModalWidgetSizePolicy { Minimum = QSizePolicy::Minimum, Expanding = QSizePolicy::Expanding };
     Q_ENUM(ModalWidgetSizePolicy)
 
@@ -93,6 +100,8 @@ Q_SIGNALS:
     void connectionLabelChanged();
     void notificationsChanged();
     void onDemandSyncStatusChanged();
+    void onDemandSpacesChanged();
+    void onDemandPausedChanged();
 
 public Q_SLOTS:
     void slotAccountStateChanged();

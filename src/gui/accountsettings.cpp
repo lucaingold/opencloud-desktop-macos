@@ -48,6 +48,8 @@
 
 #ifdef Q_OS_MAC
 #include "macOS/fileprovider.h"
+#include "macOS/fileproviderdomainmanager.h"
+#include "macOS/fileprovidersettings.h"
 #endif
 
 using namespace std::chrono_literals;
@@ -70,6 +72,8 @@ AccountSettings::AccountSettings(const AccountStatePtr &accountState, QWidget *p
 #ifdef Q_OS_MAC
     if (useFileProvider()) {
         connect(Mac::FileProvider::instance(), &Mac::FileProvider::statusChanged, this, &AccountSettings::onDemandSyncStatusChanged);
+        connect(Mac::FileProvider::instance()->domainManager(), &Mac::FileProviderDomainManager::syncPausedChanged, this,
+            &AccountSettings::onDemandPausedChanged);
     }
 #endif
 
@@ -195,6 +199,67 @@ QString AccountSettings::onDemandSyncStatus() const
     }
 #endif
     return {};
+}
+
+QVariantList AccountSettings::onDemandSpaces() const
+{
+    QVariantList result;
+#ifdef Q_OS_MAC
+    if (!useFileProvider()) {
+        return result;
+    }
+    const auto account = _accountState->account();
+    for (const auto *space : account->spacesManager()->spaces()) {
+        if (space->disabled() || !space->webdavUrl().isValid() || space->webdavUrl().isEmpty()) {
+            continue;
+        }
+        result.append(QVariantMap{{QStringLiteral("id"), space->id()}, {QStringLiteral("name"), space->displayName()},
+            {QStringLiteral("personal"), Mac::isPersonalSpace(space)},
+            {QStringLiteral("selected"), Mac::isFileProviderSpaceSelected(account->uuid(), space)}});
+    }
+    // Personal space first, then by name, like the space list on Windows.
+    std::ranges::sort(result, [](const QVariant &a, const QVariant &b) {
+        const auto left = a.toMap(), right = b.toMap();
+        if (left.value(QStringLiteral("personal")).toBool() != right.value(QStringLiteral("personal")).toBool()) {
+            return left.value(QStringLiteral("personal")).toBool();
+        }
+        return QString::localeAwareCompare(left.value(QStringLiteral("name")).toString(), right.value(QStringLiteral("name")).toString()) < 0;
+    });
+#endif
+    return result;
+}
+
+void AccountSettings::setOnDemandSpaceSelected(const QString &spaceId, bool selected)
+{
+#ifdef Q_OS_MAC
+    if (useFileProvider()) {
+        Mac::FileProvider::instance()->domainManager()->setSpaceSelected(_accountState.data(), spaceId, selected);
+        Q_EMIT onDemandSpacesChanged();
+    }
+#else
+    Q_UNUSED(spaceId)
+    Q_UNUSED(selected)
+#endif
+}
+
+bool AccountSettings::onDemandPaused() const
+{
+#ifdef Q_OS_MAC
+    return useFileProvider() && Mac::FileProvider::instance()->domainManager()->syncPaused();
+#else
+    return false;
+#endif
+}
+
+void AccountSettings::setOnDemandPaused(bool paused)
+{
+#ifdef Q_OS_MAC
+    if (useFileProvider()) {
+        Mac::FileProvider::instance()->domainManager()->setSyncPaused(paused);
+    }
+#else
+    Q_UNUSED(paused)
+#endif
 }
 
 
@@ -418,6 +483,9 @@ void AccountSettings::slotSpacesUpdated()
     if (_syncedSpaces != syncedSpaces) {
         _syncedSpaces = syncedSpaces;
         Q_EMIT syncedSpacesChanged();
+    }
+    if (useFileProvider()) {
+        Q_EMIT onDemandSpacesChanged();
     }
 }
 

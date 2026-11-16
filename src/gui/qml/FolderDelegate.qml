@@ -141,6 +141,35 @@ Pane {
             text: qsTr("Files are available on demand in Finder. To download selected folders locally, enable traditional folder sync in Settings.")
         }
 
+        Label {
+            Layout.fillWidth: true
+            visible: accountSettings.useFileProvider && accountSettings.onDemandSpaces.length > 1
+            wrapMode: Text.WordWrap
+            font.bold: true
+            text: qsTr("Spaces shown in Finder")
+        }
+
+        Repeater {
+            model: accountSettings.useFileProvider && accountSettings.onDemandSpaces.length > 1 ? accountSettings.onDemandSpaces : []
+
+            CheckBox {
+                Layout.fillWidth: true
+                text: modelData.name
+                checked: modelData.selected
+                // The personal space is always available, like the space the account wizard sets up on Windows.
+                enabled: !modelData.personal
+                ToolTip.visible: hovered && !modelData.personal
+                ToolTip.text: qsTr("Removing a space from Finder frees its downloaded files. Files on the server and unsynchronized changes are kept.")
+                onToggled: accountSettings.setOnDemandSpaceSelected(modelData.id, checked)
+            }
+        }
+
+        Button {
+            visible: accountSettings.useFileProvider
+            text: accountSettings.onDemandPaused ? qsTr("Resume synchronization") : qsTr("Pause synchronization")
+            onClicked: accountSettings.setOnDemandPaused(!accountSettings.onDemandPaused)
+        }
+
         ScrollView {
             id: scrollView
             Layout.fillHeight: true

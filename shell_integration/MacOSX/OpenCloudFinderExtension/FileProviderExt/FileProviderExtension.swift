@@ -277,9 +277,14 @@ import UniformTypeIdentifiers
 
     /// The desktop client's ignore list, shared through the app group by the host app.
     var syncExclusions: SyncExclusions {
-        let lines = (try? persistedCredentialState())?[SyncExclusions.appGroupKey] as? [String] ?? []
+        let values = (try? persistedCredentialState()) ?? [:]
+        let lines = values[SyncExclusions.appGroupKey] as? [String] ?? []
+        // Older hosts did not share the choice; they synced hidden files.
+        let ignoreHidden = (values[SyncExclusions.ignoreHiddenFilesKey] as? NSNumber)?.boolValue ?? false
         return Self.exclusionsLock.withLock {
-            if Self.exclusionsCache.lines != lines { Self.exclusionsCache = SyncExclusions(lines: lines) }
+            if Self.exclusionsCache.lines != lines || Self.exclusionsCache.ignoreHiddenFiles != ignoreHidden {
+                Self.exclusionsCache = SyncExclusions(lines: lines, ignoreHiddenFiles: ignoreHidden)
+            }
             return Self.exclusionsCache
         }
     }

@@ -19,6 +19,7 @@
 #include "macOS/fileproviderdomainhistory.h"
 #include "macOS/fileproviderdomainidentity.h"
 #include "macOS/fileproviderdomainmanager.h"
+#include "macOS/fileprovidersettings.h"
 #include "macOS/fileproviderxpc.h"
 #include <QEventLoop>
 #include <QFutureWatcher>
@@ -185,7 +186,7 @@ public:
                 capabilitiesCurrent &= existing.supportsSyncingTrash == supportsSearch;
             }
             if (capabilitiesCurrent) {
-                reconnectDomain(domainId, owner);
+                applySyncState(domainId, owner);
                 return;
             }
         }
@@ -238,6 +239,8 @@ public:
                                Q_EMIT guard->domainRegistered(domainId);
                                if (currentAccount->isSignedOut()) {
                                    guard->d->disconnectDomain(domainId, FileProviderDomainManager::tr("You have been signed out."));
+                               } else if (fileProviderSyncPaused()) {
+                                   guard->d->applySyncState(domainId, guard);
                                }
                                Q_EMIT guard->domainSetupComplete();
                            });
@@ -269,6 +272,7 @@ public:
                     guard->d->_registeredDomains.remove(domainId);
                     guard->d->_connectedDomains.remove(domainId);
                     guard->d->_reconnectingDomains.remove(domainId);
+                    guard->d->_pausedDomains.remove(domainId);
                     rememberFileProviderDomains(guard->d->_registeredDomains.keys());
                     Q_EMIT guard->nativeError(domainId, {});
                     Q_EMIT guard->domainRemoved(domainId);
@@ -282,6 +286,19 @@ public:
         disconnectDomain(domainIdentifierFromAccount(accountState->account().get()), reason);
     }
 
+    // A paused domain stays disconnected: Finder shows the reason and keeps local
+    // changes pending until it is reconnected, like pausing a sync folder.
+    void applySyncState(const QString &domainId, FileProviderDomainManager *owner)
+    {
+        if (!fileProviderSyncPaused()) {
+            _pausedDomains.remove(domainId);
+            reconnectDomain(domainId, owner);
+        } else if (!_pausedDomains.contains(domainId)) {
+            disconnectDomain(domainId, FileProviderDomainManager::tr("Synchronization is paused."));
+            _pausedDomains.insert(domainId);
+        }
+    }
+
     void disconnectDomain(QString domainId, const QString &reason)
     {
         NSFileProviderDomain *domain = _registeredDomains.value(domainId);
@@ -289,6 +306,7 @@ public:
             return;
         }
         _connectedDomains.remove(domainId);
+        _pausedDomains.remove(domainId);
         NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:domain];
         const QPointer<FileProviderDomainManager> guard(_owner);
         if (!manager) {
@@ -334,6 +352,10 @@ public:
                 if (!error) {
                     guard->d->_connectedDomains.insert(domainId);
                 }
+                if (fileProviderSyncPaused()) {
+                    // Paused while the reconnect was in flight.
+                    guard->d->applySyncState(domainId, guard);
+                }
                 Q_EMIT guard->nativeError(domainId, error ? QString::fromNSString(error.localizedDescription) : QString());
             });
         }];
@@ -352,6 +374,7 @@ private:
     QSet<QString> _pendingDomains;
     QSet<QString> _connectedDomains;
     QSet<QString> _reconnectingDomains;
+    QSet<QString> _pausedDomains;
 };
 
 // FileProviderDomainManager implementation
@@ -450,6 +473,7 @@ void FileProviderDomainManager::removeFileProviderDomainForAccount(const Account
 
     const auto accountId = accountState->account()->uuid();
     _watchedAccounts.remove(accountId.toString(QUuid::WithoutBraces));
+    forgetFileProviderSpaceSelection(accountId);
     for (const auto &domainId : d->registeredDomainIds()) {
         const auto identity = fileProviderDomainIdentity(domainId);
         if (identity && identity->account == accountId) {
@@ -534,7 +558,8 @@ void FileProviderDomainManager::reconcileSpaces(const AccountState *accountState
     const auto spaces = accountState->account()->spacesManager()->spaces();
     QSet<QString> desired;
     for (const auto *space : spaces) {
-        if (space->disabled() || !space->webdavUrl().isValid() || space->webdavUrl().isEmpty()) {
+        if (space->disabled() || !space->webdavUrl().isValid() || space->webdavUrl().isEmpty()
+            || !isFileProviderSpaceSelected(accountState->account()->uuid(), space)) {
             continue;
         }
         desired.insert(fileProviderDomainIdentifier(accountState->account()->uuid(), space->id(), space->drive().getDriveType() == QLatin1String("personal")));
@@ -576,10 +601,43 @@ GraphApi::Space *FileProviderDomainManager::spaceFromDomainIdentifier(const QStr
     for (auto *space : account->account()->spacesManager()->spaces()) {
         if (!space->disabled()
             && (identity->spaceId.isEmpty() ? space->drive().getDriveType() == QLatin1String("personal") : space->id() == identity->spaceId)) {
-            return space;
+            // A space the user removed from Finder is treated like one removed on the server.
+            return isFileProviderSpaceSelected(identity->account, space) ? space : nullptr;
         }
     }
     return nullptr;
+}
+
+void FileProviderDomainManager::setSpaceSelected(const AccountState *accountState, const QString &spaceId, bool selected)
+{
+    if (!accountState) {
+        return;
+    }
+    setFileProviderSpaceSelected(accountState->account()->uuid(), spaceId, selected);
+    reconcileSpaces(accountState);
+}
+
+void FileProviderDomainManager::setSyncPaused(bool paused)
+{
+    if (fileProviderSyncPaused() == paused) {
+        return;
+    }
+    setFileProviderSyncPaused(paused);
+    qCInfo(lcFileProviderDomainManager) << (paused ? "Pausing" : "Resuming") << "on-demand synchronization";
+    if (d) {
+        for (const auto &domainId : d->registeredDomainIds()) {
+            const auto account = accountStateFromDomainIdentifier(domainId);
+            if (account && !account->isSignedOut() && spaceFromDomainIdentifier(domainId)) {
+                d->applySyncState(domainId, this);
+            }
+        }
+    }
+    Q_EMIT syncPausedChanged();
+}
+
+bool FileProviderDomainManager::syncPaused() const
+{
+    return fileProviderSyncPaused();
 }
 
 QString FileProviderDomainManager::domainIdentifierForAccount(const AccountState *accountState) const

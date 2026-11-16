@@ -26,6 +26,15 @@ import Foundation
         check(!user.isExcluded(path: "/Other/Projects/secret/api.key", isDirectory: false), "path patterns are anchored at the root")
         check(user.isExcluded(path: "/var/server.log", isDirectory: false), "a leading ] still excludes")
         check(SyncExclusions(lines: []).isExcluded(path: "/.DS_Store", isDirectory: false) == false, "an empty list excludes nothing")
+
+        let hidden = SyncExclusions(lines: [], ignoreHiddenFiles: true)
+        check(!hidden.isEmpty, "the hidden files rule alone is a rule")
+        check(hidden.isExcluded(path: "/.env", isDirectory: false), "hidden files stay local")
+        check(hidden.isExcluded(path: "/repo/.git", isDirectory: true), "hidden folders stay local")
+        check(hidden.isExcluded(path: "/repo/.git/config", isDirectory: false), "items in hidden folders stay local")
+        check(!hidden.isExcluded(path: "/repo/notes.txt", isDirectory: false), "visible files are synced")
+        check(!hidden.isExcluded(path: "/repo/v1.2.txt", isDirectory: false), "a dot inside a name is not hidden")
+        check(!SyncExclusions(lines: []).isExcluded(path: "/.env", isDirectory: false), "hidden files sync when the user opts in")
         print("FileProvider exclusion tests passed")
     }
 }

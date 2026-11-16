@@ -74,6 +74,8 @@ namespace Mac {
         void clearAccountConfiguration(const QString &domainIdentifier, std::function<void(bool)> completion);
         void closeConnection(const QString &domainIdentifier);
         void refreshSyncStatus();
+        /// Share the ignore list and the hidden files choice with the extensions.
+        void publishSyncOptions();
 
     Q_SIGNALS:
         void domainConnected(const QString &domainIdentifier);

@@ -20,6 +20,7 @@ import Foundation
 /// - A trailing `/` restricts a pattern to directories.
 /// - Patterns without `/` match the name of the item or of any parent folder;
 ///   patterns with `/` match the path relative to the space root, where `*` does not cross `/`.
+/// - Unless the user chose to sync hidden files, names starting with `.` are excluded too.
 struct SyncExclusions: Equatable {
     private struct Pattern: Equatable {
         let glob: String
@@ -29,11 +30,14 @@ struct SyncExclusions: Equatable {
 
     private let patterns: [Pattern]
     let lines: [String]
+    let ignoreHiddenFiles: Bool
 
     static let appGroupKey = "fp_exclude_patterns"
+    static let ignoreHiddenFilesKey = "fp_ignore_hidden_files"
 
-    init(lines: [String]) {
+    init(lines: [String], ignoreHiddenFiles: Bool = false) {
         self.lines = lines
+        self.ignoreHiddenFiles = ignoreHiddenFiles
         patterns = lines.compactMap { raw in
             var line = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n"))
             if line.isEmpty || line.hasPrefix("#") { return nil }
@@ -48,12 +52,13 @@ struct SyncExclusions: Equatable {
         }
     }
 
-    var isEmpty: Bool { patterns.isEmpty }
+    var isEmpty: Bool { patterns.isEmpty && !ignoreHiddenFiles }
 
     /// `path` is relative to the space root, e.g. "/Documents/report.docx".
     func isExcluded(path: String, isDirectory: Bool) -> Bool {
         let components = path.split(separator: "/").map(String.init)
         guard !components.isEmpty else { return false }
+        if ignoreHiddenFiles && components.contains(where: { $0.hasPrefix(".") }) { return true }
         for pattern in patterns {
             if pattern.matchesPath {
                 // A full-path pattern also excludes everything below a matching folder.

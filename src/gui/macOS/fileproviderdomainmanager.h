@@ -78,11 +78,19 @@ namespace Mac {
          */
         void *domainForAccount(const AccountState *accountState) const;
 
+        /// Show or remove a space in Finder. The personal space is always shown.
+        void setSpaceSelected(const AccountState *accountState, const QString &spaceId, bool selected);
+
+        /// Pause or resume all on-demand domains, also across restarts.
+        void setSyncPaused(bool paused);
+        bool syncPaused() const;
+
     Q_SIGNALS:
         void domainSetupComplete();
         void domainRegistered(const QString &domainIdentifier);
         void domainRemoved(const QString &domainIdentifier);
         void nativeError(const QString &domainIdentifier, const QString &error);
+        void syncPausedChanged();
 
     public Q_SLOTS:
         void addFileProviderDomainForAccount(const AccountState *accountState);

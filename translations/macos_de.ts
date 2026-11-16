@@ -13,6 +13,22 @@
 <context>
     <name>FolderDelegate</name>
     <message>
+        <source>Spaces shown in Finder</source>
+        <translation>Spaces im Finder</translation>
+    </message>
+    <message>
+        <source>Removing a space from Finder frees its downloaded files. Files on the server and unsynchronized changes are kept.</source>
+        <translation>Wird ein Space aus dem Finder entfernt, wird der Speicher seiner heruntergeladenen Dateien freigegeben. Die Dateien auf dem Server und noch nicht synchronisierte Änderungen bleiben erhalten.</translation>
+    </message>
+    <message>
+        <source>Resume synchronization</source>
+        <translation>Synchronisierung fortsetzen</translation>
+    </message>
+    <message>
+        <source>Pause synchronization</source>
+        <translation>Synchronisierung pausieren</translation>
+    </message>
+    <message>
         <source>Files are available on demand in Finder. To download selected folders locally, enable traditional folder sync in Settings.</source>
         <translation>Dateien sind im Finder bei Bedarf verfügbar. Um ausgewählte Ordner lokal herunterzuladen, aktivieren Sie in den Einstellungen die klassische Ordner-Synchronisation.</translation>
     </message>
@@ -58,6 +74,10 @@
 </context>
 <context>
     <name>OCC::Mac::FileProvider</name>
+    <message>
+        <source>On-demand synchronization is paused</source>
+        <translation>Die Synchronisierung der Dateien bei Bedarf ist pausiert</translation>
+    </message>
     <message>
         <source>The on-demand provider returned an invalid sync status.</source>
         <translation>Der Anbieter für Dateien bei Bedarf hat einen ungültigen Synchronisationsstatus gemeldet.</translation>
@@ -141,6 +161,10 @@
 </context>
 <context>
     <name>OCC::Mac::FileProviderDomainManager</name>
+    <message>
+        <source>Synchronization is paused.</source>
+        <translation>Die Synchronisierung ist pausiert.</translation>
+    </message>
     <message>
         <source>This account has been removed.</source>
         <translation>Dieses Konto wurde entfernt.</translation>

@@ -18,6 +18,7 @@
 #include "macOS/fileprovider.h"
 #include "macOS/fileproviderdomainidentity.h"
 #include "macOS/fileproviderdomainmanager.h"
+#include "macOS/fileprovidersettings.h"
 #include "macOS/fileproviderxpc.h"
 #include <QDir>
 #include <QFileInfo>
@@ -79,6 +80,11 @@ static NSArray<NSString *> *syncExcludePatterns()
         }
     }
     return patterns;
+}
+
+static NSDictionary<NSString *, id> *syncOptions()
+{
+    return @{@"fp_exclude_patterns" : syncExcludePatterns(), @"fp_ignore_hidden_files" : @(OCC::Mac::fileProviderIgnoresHiddenFiles())};
 }
 
 static bool persistCredentialState(const QString &appGroupIdentifier, NSDictionary<NSString *, id> *values)
@@ -396,9 +402,9 @@ void FileProviderXPC::authenticateFileProviderDomain(QString domainIdentifier)
     NSObject<ClientCommunicationProtocol> *service = (__bridge NSObject<ClientCommunicationProtocol> *)servicePtr;
 
     NSString *generation = QUuid::createUuid().toString(QUuid::WithoutBraces).toNSString();
-    if (!persistCredentialState(_appGroupIdentifier, @{
-            [@"fp_config_generation_" stringByAppendingString:domainIdentifier.toNSString()] : generation,
-            @"fp_exclude_patterns" : syncExcludePatterns()})) {
+    NSMutableDictionary<NSString *, id> *state = [syncOptions() mutableCopy];
+    state[[@"fp_config_generation_" stringByAppendingString:domainIdentifier.toNSString()]] = generation;
+    if (!persistCredentialState(_appGroupIdentifier, state)) {
         qCWarning(lcFileProviderXPC) << "Could not persist the credential generation for domain:" << domainIdentifier;
         Q_EMIT domainStatusChanged(domainIdentifier, tr("Could not persist the on-demand credential generation."));
         return;
@@ -563,6 +569,13 @@ void FileProviderXPC::clearAccountConfiguration(const QString &domainIdentifier,
     [service removeAccountConfigWithGeneration:generation.toNSString()
                              completionHandler:^(NSError *error) { dispatch_async(dispatch_get_main_queue(), ^{ finish(error == nil); }); }];
     QTimer::singleShot(std::chrono::seconds(3), this, [finish] { finish(false); });
+}
+
+void FileProviderXPC::publishSyncOptions()
+{
+    if (!persistCredentialState(_appGroupIdentifier, syncOptions())) {
+        qCWarning(lcFileProviderXPC) << "Could not share the sync options with the on-demand extensions";
+    }
 }
 
 void FileProviderXPC::finishClearingAccount(const QString &domainIdentifier, bool success)
