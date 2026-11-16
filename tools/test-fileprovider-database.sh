@@ -32,3 +32,9 @@ xcrun swiftc -parse-as-library \
   "$repo_root/test/macos/test_fileprovider_exclusions.swift" \
   -o "$test_dir/test-fileprovider-exclusions"
 "$test_dir/test-fileprovider-exclusions" "$repo_root/src/resources/theme/universal/sync-exclude.lst"
+
+xcrun swiftc -parse-as-library \
+  "$sources/WebDAV/PartialReadAhead.swift" \
+  "$repo_root/test/macos/test_fileprovider_readahead.swift" \
+  -o "$test_dir/test-fileprovider-readahead"
+"$test_dir/test-fileprovider-readahead"

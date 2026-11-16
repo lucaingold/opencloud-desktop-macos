@@ -25,6 +25,8 @@ import UniformTypeIdentifiers
 
     let domain: NSFileProviderDomain
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "eu.opencloud.desktop.FileProviderExt", category: "FileProviderExtension")
+    /// Grows and prefetches partial downloads while a player reads a file sequentially.
+    let readAhead = PartialReadAhead()
 
     // Multiple instances for one domain share authentication, but accounts must
     // never share a client or download hashes. XPC and provider callbacks overlap.
@@ -256,6 +258,8 @@ import UniformTypeIdentifiers
     func invalidate() {
         logger.debug("FileProviderExtension invalidated for domain: \(self.domain.identifier.rawValue)")
         socketClient?.closeConnection()
+        let readAhead = readAhead
+        Task { await readAhead.invalidate() }
         // Don't nil out shared webdavClient on invalidate — other instances may need it
     }
 
@@ -1413,20 +1417,26 @@ extension FileProviderExtension: NSFileProviderPartialContentFetching {
                 }
 
                 let directory = (try? NSFileProviderManager(for: self.domain)?.temporaryDirectoryURL()) ?? FileManager.default.temporaryDirectory
-                let fileURL = directory.appendingPathComponent(UUID().uuidString)
-                var delivered = false
-                defer { if !delivered { try? FileManager.default.removeItem(at: fileURL) } }
+                let remotePath = metadata.remotePath
+                let etag = metadata.etag.isEmpty ? nil : metadata.etag
+                let requested = Int64(requestedRange.location)..<Int64(requestedRange.location + requestedRange.length)
+                let fileURL: URL
                 let retrieved: Range<Int64>
                 do {
-                    retrieved = try await webdav.downloadRange(remotePath: metadata.remotePath, range: range, into: fileURL,
-                                                               ifMatchEtag: metadata.etag.isEmpty ? nil : metadata.etag, progress: progress)
+                    (fileURL, retrieved) = try await self.readAhead.fetch(
+                        item: itemIdentifier.rawValue, version: metadata.etag, requested: requested, planned: range,
+                        fileSize: metadata.size, baseUnit: WebDAVClient.partialFetchUnit, directory: directory) { range, file in
+                            try await webdav.downloadRange(remotePath: remotePath, range: range, into: file, ifMatchEtag: etag, progress: nil)
+                        }
                 } catch WebDAVError.conflict {
                     // The file changed on the server: let the system pick up the new version.
                     self.signalEnumerator(for: parent)
                     throw NSFileProviderError(.versionNoLongerAvailable)
                 }
-                try Task.checkCancellation()
-                delivered = true
+                if Task.isCancelled {
+                    try? FileManager.default.removeItem(at: fileURL)
+                    throw CancellationError()
+                }
                 progress.completedUnitCount = progress.totalUnitCount
                 let item = FileProviderItem(metadata: metadata, parentItemIdentifier: parent, supportsTrash: self.supportsTrash)
                 completionHandler(fileURL, item, NSRange(location: Int(retrieved.lowerBound), length: Int(retrieved.count)), [], nil)
