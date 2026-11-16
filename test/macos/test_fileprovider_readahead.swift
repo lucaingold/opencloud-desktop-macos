@@ -60,6 +60,16 @@ actor Server {
         let ahead = await server.downloads.last!
         check(ahead.lowerBound < last.upperBound - 64 * 1024 && ahead.count == Int(PartialReadAhead.maximumUnit),
               "the read-ahead overlaps the end of the last range and stays at the maximum")
+        // Seen live: the system sometimes asks again from 1.5 MB before the end. The read-ahead is used
+        // and only the missing bytes in front of it are fetched.
+        let early = last.upperBound - 1536 * 1024
+        let before = await server.downloads.count
+        last = try await read(early).1
+        await settle()
+        let fetched = await server.downloads.suffix(from: before)
+        check(last.lowerBound == early && last.upperBound == ahead.upperBound, "an early read is answered from the read-ahead")
+        check(fetched.first == early..<ahead.lowerBound, "only the bytes before the read-ahead are fetched extra")
+        check(fetched.count == 2, "then the next read-ahead starts")
         var position = last.upperBound
 
         // Skipping a little (interleaved audio) still counts as sequential.
@@ -69,11 +79,11 @@ actor Server {
         await settle()
 
         // A seek drops the read-ahead and starts small again.
-        let before = await server.downloads.count
+        let beforeSeek = await server.downloads.count
         let seek = try await read(1000 * mb)
         await settle()
         check(seek.1 == (1000 * mb)..<(1004 * mb), "a seek fetches the base unit")
-        check(await server.downloads.count == before + 1, "a seek does not read ahead")
+        check(await server.downloads.count == beforeSeek + 1, "a seek does not read ahead")
 
         // A failed read-ahead falls back to a direct download.
         let failing = (1011 * mb)..<(1027 * mb) // read-ahead after 1004..1012 starts 1 MB early

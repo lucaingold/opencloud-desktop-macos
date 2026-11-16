@@ -26,8 +26,9 @@ actor PartialReadAhead {
     /// Read-ahead nobody asked for within this time is dropped.
     static let idleTimeout: TimeInterval = 60
     static let maximumStreams = 4
-    /// fileproviderd asks for the next range starting a little before the end of the last one
-    /// (64 KB in practice), so read-ahead starts this much earlier. A multiple of any page alignment.
+    /// fileproviderd often asks for the next range starting a little before the end of the last one
+    /// (64 KB to 1.5 MB seen live), so read-ahead starts this much earlier; a larger overlap is
+    /// filled with a small extra request. A multiple of any page alignment.
     static let overlap: Int64 = 1024 * 1024
 
     private struct Prefetch {
@@ -38,7 +39,8 @@ actor PartialReadAhead {
 
     private struct Stream {
         let version: String
-        var nextStart: Int64
+        /// The last range delivered; the next sequential read starts within it or shortly after.
+        var last: Range<Int64>
         var unit: Int64
         var prefetch: Prefetch?
         var lastUse: Date
@@ -54,22 +56,37 @@ actor PartialReadAhead {
         var stream = streams[item].flatMap { $0.version == version ? $0 : nil }
         if stream == nil, let stale = streams[item] { discard(stale.prefetch) }
 
-        // A sequential read: served from the read-ahead or right after the last delivered range.
-        if var current = stream, let prefetch = current.prefetch,
-           prefetch.range.lowerBound <= requested.lowerBound, requested.upperBound <= prefetch.range.upperBound {
+        // Sequential: the read starts within the last range or shortly after it, since players
+        // skip small parts (e.g. audio interleaved with video).
+        func isSequential(_ stream: Stream?) -> Bool {
+            stream.map { $0.last.lowerBound <= planned.lowerBound && planned.lowerBound <= $0.last.upperBound + $0.unit } ?? false
+        }
+
+        // Served from the read-ahead; bytes before it that the system asks for again are added to its file.
+        if var current = stream, isSequential(current), let prefetch = current.prefetch,
+           requested.upperBound <= prefetch.range.upperBound {
             current.prefetch = nil
             current.lastUse = now
             streams[item] = current
-            if let delivered = try? await prefetch.task.value {
-                advance(item: item, version: version, delivered: delivered, sequential: true, fileSize: fileSize, baseUnit: baseUnit, directory: directory, download: download)
-                return (prefetch.file, delivered)
+            if var delivered = try? await prefetch.task.value {
+                var complete = true
+                if planned.lowerBound < delivered.lowerBound {
+                    if let head = try? await download(planned.lowerBound..<delivered.lowerBound, prefetch.file) {
+                        delivered = min(head.lowerBound, delivered.lowerBound)..<delivered.upperBound
+                    } else {
+                        complete = false
+                    }
+                }
+                if complete {
+                    advance(item: item, version: version, delivered: delivered, sequential: true, fileSize: fileSize, baseUnit: baseUnit, directory: directory, download: download)
+                    return (prefetch.file, delivered)
+                }
             }
             try? FileManager.default.removeItem(at: prefetch.file)
             stream = streams[item]
         }
 
-        // Players skip small parts (e.g. audio interleaved with video), so a short gap still counts as sequential.
-        let sequential = stream.map { $0.nextStart - Self.overlap <= planned.lowerBound && planned.lowerBound <= $0.nextStart + $0.unit } ?? false
+        let sequential = isSequential(stream)
         if !sequential, let stale = stream?.prefetch {
             discard(stale)
             streams[item]?.prefetch = nil
@@ -100,9 +117,9 @@ actor PartialReadAhead {
     private func advance(item: String, version: String, delivered: Range<Int64>, sequential: Bool, fileSize: Int64,
                          baseUnit: Int64, directory: URL, download: @escaping Download) {
         var stream = streams[item].flatMap { $0.version == version ? $0 : nil }
-            ?? Stream(version: version, nextStart: 0, unit: baseUnit, prefetch: nil, lastUse: Date())
+            ?? Stream(version: version, last: delivered, unit: baseUnit, prefetch: nil, lastUse: Date())
         stream.unit = sequential ? max(Int64(delivered.count), baseUnit) : baseUnit
-        stream.nextStart = delivered.upperBound
+        stream.last = delivered
         stream.lastUse = Date()
         // Read ahead only once the reader moves on sequentially; a single probe (e.g. the index
         // at the end of a video) does not need the following bytes.
