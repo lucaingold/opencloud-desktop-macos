@@ -13,6 +13,10 @@ import Foundation
             check(system.isExcluded(path: path, isDirectory: false), "\(path.debugDescription) is excluded")
         }
         check(system.isExcluded(path: "/.Trashes/file.txt", isDirectory: false), "items inside an excluded folder are excluded")
+        check(system.isExcluded(path: "/Code/app.nosync", isDirectory: true), ".nosync folders stay local")
+        check(system.isExcluded(path: "/Code/app.nosync/src/main.swift", isDirectory: false), "items inside a .nosync folder stay local")
+        check(system.isExcluded(path: "/cache.nosync", isDirectory: false), ".nosync files stay local")
+        check(!system.isExcluded(path: "/Docs/nosync-notes.txt", isDirectory: false), "nosync elsewhere in a name is synced")
         for path in ["/report.docx", "/Projects/main.swift", "/Photos/IMG_0001.HEIC", "/Docs/lock.txt", "/Icon.png"] {
             check(!system.isExcluded(path: path, isDirectory: false), "\(path) is synced")
         }

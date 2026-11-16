@@ -23,6 +23,9 @@
 ].Trashes
 ].DocumentRevisions-V100
 
+# macOS convention for items that stay on this Mac (honoured by iCloud Drive)
+*.nosync
+
 # https://specifications.freedesktop.org/trash/1.0/
 ].Trash-*[0-9]
 ].Trash
