@@ -15,8 +15,10 @@ private final class MockTusProtocol: URLProtocol {
     static var failPatches: Int?
     static var patchCount = 0
     static var postStatus = 201
+    /// Paths that do not exist yet; PROPFIND answers 404 until an upload completes.
+    static var missing: Set<String> = []
     static func reset() {
-        uploads = [:]; requests = []; putBodies = [:]; dropPatch = nil; failPatches = nil; patchCount = 0; postStatus = 201
+        uploads = [:]; requests = []; putBodies = [:]; dropPatch = nil; failPatches = nil; patchCount = 0; postStatus = 201; missing = []
         tusExtensions = "creation,creation-with-upload,checksum"
     }
 
@@ -64,12 +66,15 @@ private final class MockTusProtocol: URLProtocol {
             respond(201)
         case "POST":
             guard Self.postStatus == 201 else { return respond(Self.postStatus) }
+            // Like OpenCloud: conditions on the creation request apply to the space root, which exists.
+            if request.value(forHTTPHeaderField: "If-None-Match") == "*" { return respond(412) }
             let id = "/data/upload-\(Self.uploads.count + 1)"
             var upload = Upload()
             upload.length = Int(request.value(forHTTPHeaderField: "Upload-Length") ?? "") ?? -1
             upload.metadata = request.value(forHTTPHeaderField: "Upload-Metadata") ?? ""
             upload.data = payload
             Self.uploads[id] = upload
+            if upload.data.count == upload.length { Self.missing = [] }
             respond(201, ["Location": id, "Upload-Offset": String(payload.count)])
         case "HEAD":
             guard let upload = Self.uploads[path] else { return respond(404) }
@@ -85,8 +90,10 @@ private final class MockTusProtocol: URLProtocol {
             }
             upload.data.append(payload)
             Self.uploads[path] = upload
+            if upload.data.count == upload.length { Self.missing = [] }
             respond(204, ["Upload-Offset": String(upload.data.count)])
         case "PROPFIND":
+            if Self.missing.contains(path) { return respond(404) }
             let xml = """
             <d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>\(path)</d:href><d:propstat><d:prop>
             <d:getetag>"after-upload"</d:getetag><d:getcontentlength>1</d:getcontentlength><oc:fileid>file-1</oc:fileid>
@@ -210,6 +217,26 @@ actor MemoryResumeStore: TusResumeStore {
             preconditionFailure("a stale If-Match must fail")
         } catch WebDAVError.conflict {}
         check(MockTusProtocol.requests.filter { $0.method == "POST" }.count == 1, "a conflict is not retried")
+
+        // A new file must not overwrite one that appeared on the server, but the guard cannot be a
+        // conditional header on the creation request: that request targets the space root.
+        MockTusProtocol.reset()
+        MockTusProtocol.missing = ["/dav/spaces/space-1/folder/new.bin"]
+        dav = client()
+        let created = try await dav.uploadFile(from: file, to: "/folder/new.bin", ifNoneMatch: true, progress: nil, modificationDate: mtime)
+        check(created != nil && MockTusProtocol.uploads.values.first?.data == expected, "a new large file is uploaded")
+        let newPost = MockTusProtocol.requests.first { $0.method == "POST" }!
+        check(newPost.headers["If-None-Match"] == nil, "the creation request carries no If-None-Match")
+        check(MockTusProtocol.requests.first?.method == "PROPFIND" || MockTusProtocol.requests.prefix(2).contains { $0.method == "PROPFIND" },
+              "the client checks that the target is still free before creating the upload")
+
+        MockTusProtocol.reset()
+        dav = client()
+        do {
+            _ = try await dav.uploadFile(from: file, to: "/folder/new.bin", ifNoneMatch: true, progress: nil, modificationDate: mtime)
+            preconditionFailure("a file that appeared on the server must not be overwritten")
+        } catch WebDAVError.conflict {}
+        check(!MockTusProtocol.requests.contains { $0.method == "POST" }, "no upload is created over an existing file")
 
         // Servers without TUS keep the single-request upload.
         MockTusProtocol.reset()

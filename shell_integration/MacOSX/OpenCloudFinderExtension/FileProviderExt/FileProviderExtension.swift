@@ -684,7 +684,9 @@ import UniformTypeIdentifiers
                                                                       modificationDate: fields.contains(.contentModificationDate) ? itemTemplate.contentModificationDate ?? nil : nil,
                                                                       resumeStore: database)
                         } catch WebDAVError.conflict {
-                            if let existing = try await webdav.listDirectory(path: remotePath).first {
+                            // A 404 here means the conflict was not about this file. Report a retryable
+                            // failure: "no such item" would make macOS treat the local file as gone.
+                            if let existing = try? await webdav.listDirectory(path: remotePath).first {
                                 let metadata = try await database.mergeServerMetadata(ItemMetadata(from: existing, parentOcId: parentOcId))
                                 let collision = FileProviderItem(metadata: metadata, parentItemIdentifier: itemTemplate.parentItemIdentifier, supportsTrash: supportsTrash)
                                 throw NSError.fileProviderErrorForCollision(with: collision)

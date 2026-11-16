@@ -498,7 +498,16 @@ actor WebDAVClient {
                 var request: URLRequest
                 let creating = location == nil
                 if creating {
-                    request = try tusRequest(url: base, method: "POST", tus: tus, ifMatchEtag: ifMatchEtag, ifNoneMatch: ifNoneMatch, modificationDate: modificationDate)
+                    // The creation request goes to the space root, so a conditional header would be
+                    // evaluated against the root, which always exists. Like the sync engine, never send
+                    // If-None-Match there; check that the target is still free instead.
+                    if ifNoneMatch {
+                        do {
+                            _ = try await performListDirectory(path: remotePath, depth: "0")
+                            throw WebDAVError.conflict
+                        } catch WebDAVError.fileNotFound {}
+                    }
+                    request = try tusRequest(url: base, method: "POST", tus: tus, ifMatchEtag: ifMatchEtag, ifNoneMatch: false, modificationDate: modificationDate)
                     func meta(_ key: String, _ value: String) -> String { key + " " + Data(value.utf8).base64EncodedString() }
                     var metadata = [meta("filename", path), meta("checksum", checksum.type + " " + checksum.value)]
                     if !mtime.isEmpty { metadata.append(meta("mtime", mtime)) }
