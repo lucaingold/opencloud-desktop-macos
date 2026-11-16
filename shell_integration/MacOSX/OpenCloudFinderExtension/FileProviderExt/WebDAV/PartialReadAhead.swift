@@ -65,7 +65,8 @@ actor PartialReadAhead {
             stream = streams[item]
         }
 
-        let sequential = stream.map { planned.lowerBound == $0.nextStart } ?? false
+        // Players skip small parts (e.g. audio interleaved with video), so a short gap still counts as sequential.
+        let sequential = stream.map { $0.nextStart <= planned.lowerBound && planned.lowerBound - $0.nextStart <= $0.unit } ?? false
         if !sequential, let stale = stream?.prefetch {
             discard(stale)
             streams[item]?.prefetch = nil

@@ -65,6 +65,13 @@ actor Server {
         }
         check(await server.downloads.last.map { $0.count } == Int(PartialReadAhead.maximumUnit), "ranges are capped at the maximum unit")
 
+        // Skipping a little (interleaved audio) still counts as sequential.
+        let gapStart = position + 1 * mb
+        let gap = try await read(gapStart)
+        check(gap.1.count > Int(4 * mb), "a short gap keeps the larger range")
+        position = gap.1.upperBound
+        await settle()
+
         // A seek drops the read-ahead and starts small again.
         let before = await server.downloads.count
         let seek = try await read(1000 * mb)

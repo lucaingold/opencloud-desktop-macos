@@ -1433,6 +1433,7 @@ extension FileProviderExtension: NSFileProviderPartialContentFetching {
                     self.signalEnumerator(for: parent)
                     throw NSFileProviderError(.versionNoLongerAvailable)
                 }
+                self.logger.debug("Partial fetch \(itemIdentifier.rawValue, privacy: .public): requested \(requested.lowerBound)+\(requested.count), delivered \(retrieved.lowerBound)+\(retrieved.count)")
                 if Task.isCancelled {
                     try? FileManager.default.removeItem(at: fileURL)
                     throw CancellationError()
