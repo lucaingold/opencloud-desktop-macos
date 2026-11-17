@@ -9,6 +9,8 @@ actor WebDAVClient {
     var failure: WebDAVError?
     var delay: UInt64 = 0
     var requests = 0
+    var failingPaths: Set<String> = []
+    func failPaths(_ paths: Set<String>) { failingPaths = paths }
     func delayRequests(_ nanoseconds: UInt64) { delay = nanoseconds }
     func requestCount() -> Int { requests }
     func configure(_ listings: [String: [WebDAVItem]], fail: Bool = false, failure: WebDAVError? = nil) {
@@ -21,7 +23,7 @@ actor WebDAVClient {
         requests += 1
         if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         if let failure = failure { throw failure }
-        if fail { throw WebDAVError.serverError }
+        if fail || failingPaths.contains(path) { throw WebDAVError.serverError }
         guard let listing = listings[path] else { throw WebDAVError.fileNotFound }
         return listing
     }
@@ -297,6 +299,40 @@ struct EnumeratorTests {
         await recoveryStatus.retireRemovedItems(scope, database: recoveryDB)
         precondition(recoveryStatus.snapshot(isAuthenticated: true)["errorCount"] as! Int == 1,
                      "Confirmed subtree deletion retires descendant/create failures but preserves a concurrently moved child's failure")
+
+        // A pass over many folders cached but never reconciled (e.g. after a full scan) that is
+        // interrupted keeps what it finished; the next pass does not start over.
+        let resumeDB = try ItemDatabase(containerURL: container, domainIdentifier: "resume")
+        let resumeServer = WebDAVClient()
+        let resumeExt = FileProviderExtension()
+        resumeExt.database = resumeDB
+        resumeExt.webdavClient = resumeServer
+        let resumeEnumerator = FileProviderEnumerator(enumeratedItemIdentifier: .workingSet, domain: domain, fpExtension: resumeExt)
+        let left = remote("left", path: "/left", directory: true)
+        let right = remote("right", path: "/right", directory: true)
+        let leftFile = remote("left-file", path: "/left/file")
+        let rightFile = remote("right-file", path: "/right/file")
+        try await resumeDB.addItemMetadata(ItemMetadata(from: left, parentOcId: ItemDatabase.rootContainerId))
+        try await resumeDB.addItemMetadata(ItemMetadata(from: right, parentOcId: ItemDatabase.rootContainerId))
+        try await resumeDB.addItemMetadata(ItemMetadata(from: leftFile, parentOcId: left.ocId))
+        try await resumeDB.addItemMetadata(ItemMetadata(from: rightFile, parentOcId: right.ocId))
+        let resumeAnchor = try await resumeDB.currentSyncAnchor()
+        await resumeServer.configure(["/": [root, left, right], "/left": [left, leftFile], "/right": [right, rightFile]])
+        await resumeServer.failPaths(["/right"])
+        let interrupted = await changes(resumeEnumerator, since: resumeAnchor)
+        precondition(interrupted.error != nil, "The failed folder fails the pass")
+        let leftListed = await resumeDB.listedETag(ocId: left.ocId)
+        let rootListedEarly = await resumeDB.listedETag(ocId: ItemDatabase.rootContainerId)
+        precondition(leftListed == "v1", "A finished subtree is kept when the pass fails later")
+        precondition(rootListedEarly == nil, "An unfinished folder is not recorded")
+        await resumeServer.failPaths([])
+        let resumeStart = await resumeServer.requestCount()
+        let resumed = await changes(resumeEnumerator, since: resumeAnchor)
+        precondition(resumed.error == nil)
+        let resumeCost = await resumeServer.requestCount() - resumeStart
+        precondition(resumeCost == 2, "The next pass lists only the root and the unfinished folder (was \(resumeCost))")
+        let rootListed = await resumeDB.listedETag(ocId: ItemDatabase.rootContainerId)
+        precondition(rootListed == "v1", "The completed pass records the root")
 
         print("FileProvider enumerator regression tests passed")
     }

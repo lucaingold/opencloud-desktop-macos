@@ -162,37 +162,52 @@ class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             catch WebDAVError.fileNotFound { /* The server may not offer an optional trash endpoint. */ }
             catch let error as CocoaError where error.code == .featureUnsupported {}
         }
-        var queue = [(path: "/", ocId: ItemDatabase.rootContainerId)]
-        var missing: [ItemMetadata] = []
-        var listed: [String: String] = [:]
-        while !queue.isEmpty {
-            try Task.checkCancellation()
-            let directory = queue.removeFirst()
-            let snapshot: DirectorySnapshot
-            do {
-                snapshot = try await loadDirectory(path: directory.path, parent: directory.ocId, webdav: webdav, database: database)
-            } catch WebDAVError.fileNotFound where directory.ocId != ItemDatabase.rootContainerId {
-                if let current = await database.itemMetadata(ocId: directory.ocId) { missing.append(current) }
-                continue
-            }
-            missing.append(contentsOf: snapshot.missing)
-            listed[directory.ocId] = snapshot.etag
-            for child in snapshot.items where child.isDirectory && !child.isTrashed {
-                if await needsListing(child, in: snapshot, database: database) {
-                    queue.append((child.remotePath, child.ocId))
-                }
-            }
-        }
+        let pass = WorkingSetPass()
+        _ = try await reconcile(path: "/", ocId: ItemDatabase.rootContainerId, pass: pass, webdav: webdav, database: database)
         // Apply all moves before deletions, so moving a cached folder between known
         // parents keeps its descendants and their local state.
-        for item in missing {
+        for item in pass.missing {
             try Task.checkCancellation()
             let retirement = await fpExtension?.syncStatus.removalScope(metadata: item, database: database)
             try await database.deleteIfUnchanged(item)
             if let retirement { await fpExtension?.syncStatus.retireRemovedItems(retirement, database: database) }
         }
-        // Record ETags last: an interrupted pass must be retried on the next check.
-        try await database.setListedETags(listed)
+        try await database.setListedETags(pass.deferredETags)
+    }
+
+    private final class WorkingSetPass {
+        var missing: [ItemMetadata] = []
+        /// Folders with items to remove: recorded only after the removals, or the next pass would skip them.
+        var deferredETags: [String: String] = [:]
+    }
+
+    /// Lists a folder and, depth first, each subfolder that may have changed. A folder's ETag is
+    /// recorded as soon as its whole subtree is reconciled, so an interrupted pass (cancelled by
+    /// the system, or a failed request) continues where it stopped instead of starting over.
+    /// Returns whether the subtree needed no removals.
+    private func reconcile(path: String, ocId: String, pass: WorkingSetPass, webdav: WebDAVClient, database: ItemDatabase) async throws -> Bool {
+        try Task.checkCancellation()
+        let snapshot: DirectorySnapshot
+        do {
+            snapshot = try await loadDirectory(path: path, parent: ocId, webdav: webdav, database: database)
+        } catch WebDAVError.fileNotFound where ocId != ItemDatabase.rootContainerId {
+            if let current = await database.itemMetadata(ocId: ocId) { pass.missing.append(current) }
+            return false
+        }
+        pass.missing.append(contentsOf: snapshot.missing)
+        var clean = snapshot.missing.isEmpty
+        for child in snapshot.items where child.isDirectory && !child.isTrashed {
+            if await needsListing(child, in: snapshot, database: database),
+               try await !reconcile(path: child.remotePath, ocId: child.ocId, pass: pass, webdav: webdav, database: database) {
+                clean = false
+            }
+        }
+        if clean {
+            try await database.setListedETags([ocId: snapshot.etag])
+        } else {
+            pass.deferredETags[ocId] = snapshot.etag
+        }
+        return clean
     }
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
