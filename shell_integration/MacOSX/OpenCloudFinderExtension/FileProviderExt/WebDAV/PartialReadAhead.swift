@@ -23,8 +23,12 @@ actor PartialReadAhead {
     typealias Download = @Sendable (_ range: Range<Int64>, _ file: URL) async throws -> Range<Int64>
 
     static let maximumUnit: Int64 = 64 * 1024 * 1024
-    /// Read-ahead nobody asked for within this time is dropped.
-    static let idleTimeout: TimeInterval = 60
+    /// Read-ahead nobody asked for within this time is dropped (e.g. the player was closed).
+    let idleTimeout: TimeInterval
+
+    init(idleTimeout: TimeInterval = 60) {
+        self.idleTimeout = idleTimeout
+    }
     static let maximumStreams = 4
     /// fileproviderd often asks for the next range starting a little before the end of the last one
     /// (64 KB to 1.5 MB seen live), so read-ahead starts this much earlier; a larger overlap is
@@ -130,14 +134,35 @@ actor PartialReadAhead {
             stream.prefetch = Prefetch(range: next, file: file, task: Task { try await download(next, file) })
         }
         streams[item] = stream
+        if stream.prefetch != nil { scheduleIdleCleanup() }
         if streams.count > Self.maximumStreams, let oldest = streams.min(by: { $0.value.lastUse < $1.value.lastUse }) {
             discard(oldest.value.prefetch)
             streams[oldest.key] = nil
         }
     }
 
+    private var cleanupScheduled = false
+
+    /// Without a later read nothing would drop the read-ahead of a closed player: its temporary
+    /// file would stay until the next video is played.
+    private func scheduleIdleCleanup() {
+        guard !cleanupScheduled else { return }
+        cleanupScheduled = true
+        let delay = UInt64((idleTimeout + 1) * 1_000_000_000)
+        Task {
+            try? await Task.sleep(nanoseconds: delay)
+            await self.idleCleanup()
+        }
+    }
+
+    private func idleCleanup() {
+        cleanupScheduled = false
+        dropIdleStreams(now: Date())
+        if streams.values.contains(where: { $0.prefetch != nil }) { scheduleIdleCleanup() }
+    }
+
     private func dropIdleStreams(now: Date) {
-        for (item, stream) in streams where now.timeIntervalSince(stream.lastUse) > Self.idleTimeout {
+        for (item, stream) in streams where now.timeIntervalSince(stream.lastUse) > idleTimeout {
             discard(stream.prefetch)
             streams[item] = nil
         }

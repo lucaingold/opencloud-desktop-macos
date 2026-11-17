@@ -104,6 +104,21 @@ actor Server {
         await settle()
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         check(leftovers.isEmpty, "discarded read-ahead files are removed (\(leftovers.count) left)")
+        // A closed player: the read-ahead is dropped after the idle time without another read.
+        let idleDirectory = directory.appendingPathComponent("idle")
+        try FileManager.default.createDirectory(at: idleDirectory, withIntermediateDirectories: true)
+        let idle = PartialReadAhead(idleTimeout: 0.2)
+        for start in [0, 4 * mb] {
+            let got = try await idle.fetch(item: "closed", version: "v1", requested: start..<(start + 4096), planned: start..<(start + 4 * mb),
+                                           fileSize: size, baseUnit: 4 * mb, directory: idleDirectory, download: download)
+            try FileManager.default.removeItem(at: got.file)
+        }
+        await settle()
+        let pendingAhead = try FileManager.default.contentsOfDirectory(atPath: idleDirectory.path).count
+        check(pendingAhead == 1, "a read-ahead is waiting (\(pendingAhead))")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let afterIdle = try FileManager.default.contentsOfDirectory(atPath: idleDirectory.path).count
+        check(afterIdle == 0, "an idle read-ahead is removed without another read (\(afterIdle) left)")
         print("FileProvider read-ahead tests passed")
     }
 }
