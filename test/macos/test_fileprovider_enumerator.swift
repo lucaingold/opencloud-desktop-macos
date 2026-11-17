@@ -224,6 +224,12 @@ struct EnumeratorTests {
         let restored = try await cold.resolveItem(identifier: "server-id", webdav: server)
         precondition(restored?.ocId == "server-id" && restored?.parentOcId == "a",
                      "Unknown server IDs must be rediscovered with their actual parents")
+        // After that one scan an unknown ID was deleted: no second walk over the whole tree.
+        await server.configure(["/": [root, a], "/a": [a, remote("server-id", path: "/a/file"), remote("late-id", path: "/a/late")]])
+        let late = try await cold.resolveItem(identifier: "late-id", webdav: server)
+        precondition(late == nil, "A completed scan must not be repeated for each unknown ID")
+        let again = try await cold.resolveItem(identifier: "server-id", webdav: server)
+        precondition(again?.ocId == "server-id", "Known items still resolve from the database")
 
         let largeDB = try ItemDatabase(containerURL: container, domainIdentifier: "large-enum")
         let largeExtension = FileProviderExtension()

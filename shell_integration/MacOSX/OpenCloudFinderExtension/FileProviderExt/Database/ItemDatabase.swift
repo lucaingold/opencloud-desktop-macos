@@ -92,6 +92,17 @@ actor ItemDatabase {
         }
         sqlite3_finalize(stmt)
         guard !columns.isEmpty else { return }
+        // Databases from before the scan limit already hold what earlier scans found; count them
+        // as scanned so the upgrade does not start another walk over the whole tree.
+        guard sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS full_scan (completed REAL NOT NULL);
+            INSERT INTO full_scan SELECT strftime('%s', 'now')
+                WHERE NOT EXISTS (SELECT 1 FROM full_scan) AND EXISTS (SELECT 1 FROM items)
+                AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'full_scan_marker');
+            CREATE TABLE IF NOT EXISTS full_scan_marker (version INTEGER);
+            """, nil, nil, nil) == SQLITE_OK else {
+            throw DatabaseError.createTableFailed(String(cString: sqlite3_errmsg(db)))
+        }
         for (name, definition) in [("share_types", "TEXT NOT NULL DEFAULT ''"), ("lock_owner", "TEXT")] where !columns.contains(name) {
             guard sqlite3_exec(db, "ALTER TABLE items ADD COLUMN \(name) \(definition)", nil, nil, nil) == SQLITE_OK else {
                 throw DatabaseError.createTableFailed(String(cString: sqlite3_errmsg(db)))
@@ -159,6 +170,8 @@ actor ItemDatabase {
                 WHERE resource_id NOT LIKE 'path:%' AND resource_id NOT LIKE 'local:%' AND resource_id NOT LIKE 'trash:%';
 
             CREATE TABLE IF NOT EXISTS sync_state (epoch TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS full_scan (completed REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS full_scan_marker (version INTEGER);
             INSERT INTO sync_state(epoch) SELECT lower(hex(randomblob(16)))
                 WHERE NOT EXISTS (SELECT 1 FROM sync_state);
             CREATE TABLE IF NOT EXISTS item_changes (
@@ -603,11 +616,40 @@ actor ItemDatabase {
         // Without a retained map there is no safe way to associate a local UUID
         // with another path. In particular, equal etags are not item identity.
         if identifier.hasPrefix("local:") { return nil }
+        // A lost database is rebuilt once by listing the whole tree. Afterwards every server item
+        // has been seen, so an unknown ID was deleted. Listing the tree again for each such request
+        // cost tens of thousands of requests per lookup on large servers, and lookups kept coming.
+        if try fullScanCompleted() { return nil }
+        try await scanWholeTree(webdav: webdav)
+        return itemMetadata(ocId: identifier)
+    }
+
+    private var runningScan: Task<Void, Error>?
+
+    private func fullScanCompleted() throws -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM full_scan LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.readFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    /// Concurrent lookups share one scan. It is not tied to a caller, so a cancelled
+    /// request does not throw away the progress and make the next one start over.
+    private func scanWholeTree(webdav: WebDAVClient) async throws {
+        if let running = runningScan { return try await running.value }
+        let scan = Task { try await self.listWholeTree(webdav: webdav) }
+        runningScan = scan
+        defer { runningScan = nil }
+        try await scan.value
+    }
+
+    private func listWholeTree(webdav: WebDAVClient) async throws {
         var pending: [(path: String, parent: String)] = [("/", Self.rootContainerId)]
         var visited = Set<String>()
         var index = 0
         while index < pending.count {
-            try Task.checkCancellation()
             let folder = pending[index]
             index += 1
             guard visited.insert(folder.path).inserted else { continue }
@@ -616,13 +658,11 @@ actor ItemDatabase {
                 listing = try await webdav.listDirectory(path: folder.path)
             } catch WebDAVError.fileNotFound { continue }
             for remote in listing.dropFirst() {
-                try Task.checkCancellation()
                 let metadata = try mergeServerMetadata(ItemMetadata(from: remote, parentOcId: folder.parent))
-                if remote.ocId == identifier || metadata.ocId == identifier { return metadata }
                 if metadata.isDirectory { pending.append((metadata.remotePath, metadata.ocId)) }
             }
         }
-        return nil
+        try executeBoundUpdate("INSERT INTO full_scan(completed) VALUES (?)", values: [String(Date().timeIntervalSince1970)])
     }
 
     private func resolveParent(path: String, webdav: WebDAVClient) async throws -> String {
@@ -907,6 +947,7 @@ actor ItemDatabase {
             try executeUpdate("DELETE FROM items")
             try executeUpdate("DELETE FROM listed_directories")
             try executeUpdate("DELETE FROM tus_uploads")
+            try executeUpdate("DELETE FROM full_scan")
         }
     }
 

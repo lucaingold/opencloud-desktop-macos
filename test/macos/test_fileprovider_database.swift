@@ -105,11 +105,18 @@ struct DatabaseTests {
             DROP TRIGGER items_delete;
             DROP TABLE item_changes;
             DROP TABLE sync_state;
+            DROP TABLE full_scan;
+            DROP TABLE full_scan_marker;
             """
         require(sqlite3_exec(handle, removeJournal, nil, nil, nil) == SQLITE_OK, "Create old-schema fixture")
         sqlite3_close(handle)
         let migrated = try ItemDatabase(containerURL: container, domainIdentifier: "legacy")
         require(await migrated.itemMetadata(ocId: "preserved") != nil, "Migration must preserve cached items")
+        // An upgraded database already holds what earlier scans found: an unknown ID is not looked
+        // for by walking the whole tree again (this client cannot reach any server).
+        let unreachable = WebDAVClient(serverURL: URL(string: "https://unreachable.invalid")!, davPath: "/dav/spaces/x",
+                                       username: "test", password: "")
+        require(try await migrated.resolveItem(identifier: "gone", webdav: unreachable) == nil, "Upgrade must count as scanned")
         let migratedAnchor = try await migrated.currentSyncAnchor()
         try await migrated.deleteItemMetadata(ocId: "preserved")
         let migratedDelete = try await migrated.changes(since: migratedAnchor, parentOcId: nil)
